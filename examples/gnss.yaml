@@ -1,0 +1,19 @@
+enums:
+  GNSSFixType:
+    type: uint8
+    values:
+      none: 0
+      fix3d: 3
+      float_fix: 5
+      int_fix: 6
+messages:
+  GNSSTimeStamp:
+    weeks: uint16
+    microseconds: uint64
+  GNSSMeasurement:
+    timestamp: GNSSTimeStamp
+    fix_type: GNSSFixType
+    position_ecef: float64[3]
+    velocity_ecef: float64[3]
+    position_covariance_ecef: float64[3,3]
+    velocity_covariance_ecef: float64[3,3]

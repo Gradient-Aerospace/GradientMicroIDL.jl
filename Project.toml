@@ -1,0 +1,14 @@
+name = "GradientMicroIDL"
+uuid = "0ffd2f36-48cf-492e-820a-25b9c1df946a"
+version = "0.1.0"
+authors = ["Tucker McClure <tucker@gradient.team>"]
+
+[deps]
+EnumX = "4e289a0a-7415-4d19-859d-a7e5c4648b56"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
+
+[compat]
+EnumX = "1.0.7"
+StaticArrays = "1.9.20"
+YAML = "0.4.16"
