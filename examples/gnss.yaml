@@ -3,7 +3,7 @@ enums:
     type: uint8
     values:
       none: 0
-      fix3d: 3
+      fix_3d: 3
       float_fix: 5
       int_fix: 6
 messages:

@@ -8,8 +8,8 @@
 import GradientMicroIDL
 
 # Generate both sets of messages.
-GradientMicroIDL.generate_julia("my_messages.yaml", "build/julia/", "MyMessages")
-GradientMicroIDL.generate_cpp("my_messages.yaml", "build/cpp/", "MyMessages")
+GradientMicroIDL.generate_julia("examples/my_messages.yaml", "build/julia/", "MyMessages")
+GradientMicroIDL.generate_cpp("examples/my_messages.yaml", "build/cpp/", "MyMessages")
 
 # Load the Julia.
 include(joinpath(@__FILE__, "../build/julia/MyMessages/MyMessages.jl"))

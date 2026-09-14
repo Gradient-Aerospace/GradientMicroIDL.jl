@@ -1,6 +1,7 @@
 module GradientMicroIDL
 
 import YAML
+using OrderedCollections: OrderedDict # To preserve the order of fields from YAML files
 
 """
 Given a file name, this will load the file as YAML and call the corresponding dict-oriented
