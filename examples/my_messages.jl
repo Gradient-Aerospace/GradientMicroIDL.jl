@@ -1,4 +1,4 @@
-# An example of building and loading Julia messages.
+# An example of generating Julia and C++ messages, then loading the Julia module.
 #
 # From this repo's root, run:
 #
@@ -11,6 +11,13 @@ import GradientMicroIDL
 root_file = GradientMicroIDL.generate_julia(
     joinpath(@__DIR__, "my_messages.yaml"),
     joinpath(@__DIR__, "..", "build", "julia"),
+    "MyMessages",
+)
+
+# Emit the corresponding header. Generation does not build or load any C++ code.
+cpp_file = GradientMicroIDL.generate_cpp(
+    joinpath(@__DIR__, "my_messages.yaml"),
+    joinpath(@__DIR__, "..", "build", "cpp"),
     "MyMessages",
 )
 

@@ -1,6 +1,6 @@
 # GradientMicroIDL
 
-This Julia package generates immutable Julia types for simple messages. The long-term goal is to generate corresponding C++ structs with identical memory layouts so messages can be shared through `ccall`. This first implementation generates Julia code only; C++ generation and cross-language layout verification will follow separately.
+This Julia package generates immutable Julia types and corresponding C++ structs for simple messages. Both generators use the same field ordering and layout calculations, with the goal of sharing messages through `ccall` without translating their contents. C++ output is currently tested as generated source; compiling it and verifying interoperability with Julia are follow-up work.
 
 ## Specifications
 
@@ -121,7 +121,21 @@ Declared enums, messages, and child namespaces are exported. Generated modules r
 
 ### C++ Implementation
 
-C++ generation is planned but not implemented. The intended layout uses ordinary unpacked storage, with Eigen views for numeric arrays. The future implementation must verify matching sizes, alignments, and field offsets against Julia on supported targets.
+C++ generation produces one self-contained C++17 header, `out_dir/Namespace/Namespace.hpp`, containing the entire namespace tree in definition order. Integers use the fixed-width types from `<cstdint>`, floating-point fields use `float` and `double`, and `char` uses `std::uint8_t`. Enums are scoped (`enum class`) with the declared integer base type.
+
+Fields use ordinary unpacked storage. An array such as `float64[3]` becomes `double field[3]`, and `float64[2,3]` becomes `double field[6]`. Matrices are flattened column-major: element `(row, column)` is at `field[row + rows * column]` with zero-based C++ indices. Arrays of messages, enums, and character bytes use the same built-in array storage.
+
+Each message has a default constructor and an explicit value constructor whose arguments follow YAML field order. Default construction initializes field values to zero, recursively, including enum values whose zero may not have a named enumerator. Padding bytes are unspecified. Value constructors take primitive and enum arguments by value, message arguments by const reference, and array arguments by const reference to a built-in array of the exact length. Array elements are copied into the message's own storage. Constructors do not accept Eigen expressions directly.
+
+Numeric array fields also have `<field>_eigen()` methods returning mutable or const `Eigen::Map` views. These views do not copy data or add fields to the struct. They use unaligned maps so Eigen does not impose SIMD alignment on the shared storage. Vectors map to column vectors; matrices retain their declared rows and columns. Eigen requires a single-row matrix to use its `RowMajor` option, which has the same element order as column-major for that shape. Character, enum, and message arrays have no Eigen accessor.
+
+A view borrows the message's storage and must not outlive it. Accessors reject temporary messages; the const overload returns a view of const elements. The header includes `<Eigen/Core>` only when numeric array fields are present. Their fixed element counts must fit Eigen's compile-time `int` range. An accessor name must not collide with a field or its containing message's name, and the root namespace cannot be `std` or `Eigen`.
+
+#### Layout checks and current limits
+
+The header emits `static_assert` checks for each message's size, alignment, field offsets, standard layout, and trivial copyability. The expected sizes and offsets come from the Julia host used for generation. These assertions will run when a consumer compiles the header; a target with a different native layout may reject it. The intended interface assumes little-endian storage and matching floating-point representations. There is no byte swapping or serialization.
+
+Current tests inspect emitted C++ source without building it or requiring Eigen to be installed. They do not yet establish binary interoperability, pointer-based calls, or by-value calls between Julia and C++. Compiled verification and its local/CI build setup remain separate follow-up work.
 
 ## Generating Code
 
@@ -131,14 +145,15 @@ When generating the code, the required arguments are (1) the top-level file, (2)
 using GradientMicroIDL
 
 root_file = generate_julia("my_messages.yaml", "my_julia_definitions", "MyMessages")
+cpp_header = generate_cpp("my_messages.yaml", "my_cpp_definitions", "MyMessages")
 include(root_file)
 ```
 
-Generation produces one root module containing the other namespaces, with one file per module. The return value is the absolute path to the root file. Definitions are validated before writing output; generated paths are overwritten, while unrelated files are left alone.
+Julia generation produces one root module containing the other namespaces, with one file per module. C++ generation puts all namespaces in one header. Each generator returns the absolute path to its root file. Definitions are validated before writing output; generated paths are overwritten, while unrelated files are left alone.
 
-The dictionary overload accepts the same namespace structure: `generate_julia(definitions, out_dir, module_name; base_dir = pwd())`. Dictionary iteration order determines declaration order, so `OrderedCollections.OrderedDict` is useful when constructing definitions directly. The `base_dir` keyword supplies the directory for file includes in that dictionary.
+Both dictionary overloads accept the same namespace structure: `generate_julia(definitions, out_dir, module_name; base_dir = pwd())` and `generate_cpp(definitions, out_dir, namespace_name; base_dir = pwd())`. Dictionary iteration order determines declaration order, so `OrderedCollections.OrderedDict` is useful when constructing definitions directly. The `base_dir` keyword supplies the directory for file includes in that dictionary.
 
-The complete example can be run from the package directory with `julia --project=. examples/my_messages.jl`. Its paths are anchored to the script directory, so it also works from another working directory when the package environment is selected.
+The complete example generates both languages and loads the Julia module. It can be run from the package directory with `julia --project=. examples/my_messages.jl`; it does not compile C++. Its paths are anchored to the script directory, so it also works from another working directory when the package environment is selected.
 
 ### Example Julia
 
@@ -188,7 +203,42 @@ The full generated module tree is in `build/julia/MyMessages/`.
 
 ### Example C++
 
-TODO
+After running the example, the header is in `build/cpp/MyMessages/MyMessages.hpp`. A consumer can include it and construct messages in the same field order as the YAML:
+
+```cpp
+#include "MyMessages/MyMessages.hpp"
+
+using namespace MyMessages::Sensors::GNSS;
+
+GNSSTimeStamp timestamp{2, 30}; // weeks, microseconds
+const double position[3] = {1.0, 2.0, 3.0};
+const double velocity[3] = {0.0, 0.0, 0.0};
+const double covariance[9] = {
+    1.0, 0.0, 0.0, // First column.
+    0.0, 1.0, 0.0, // Second column.
+    0.0, 0.0, 1.0, // Third column.
+};
+
+GNSSMeasurement measurement{
+    timestamp,
+    GNSSFixType::fix_3d,
+    position,
+    velocity,
+    covariance,
+    covariance,
+};
+
+// The view updates the array already stored in measurement.
+auto position_view = measurement.position_ecef_eigen();
+position_view(0) = 10.0;
+
+// Const messages expose read-only element access through their views.
+const auto& reading = measurement;
+auto covariance_view = reading.position_covariance_ecef_eigen();
+double variance = covariance_view(0, 0);
+```
+
+The scalar timestamp struct is emitted with `microseconds` before `weeks` in storage, while its value constructor still accepts `weeks` first. The generated header also contains the static layout checks and the const/mutable Eigen accessor definitions.
 
 ## Outstanding Questions
 

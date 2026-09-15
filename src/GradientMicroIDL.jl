@@ -1,6 +1,6 @@
 module GradientMicroIDL
 
-export generate_julia
+export generate_julia, generate_cpp
 
 import YAML
 using OrderedCollections: OrderedDict
@@ -9,6 +9,7 @@ using OrderedCollections: OrderedDict
 # consumes that tree without needing to interpret YAML or resolve dependencies again.
 include("definitions.jl")
 include("julia.jl")
+include("cpp.jl")
 
 """
     generate_julia(input_file, out_dir, module_name)
@@ -67,6 +68,61 @@ function generate_julia(
 
     # Keep source generation independent of how the definitions were supplied.
     return write_julia(namespace, out_dir)
+
+end
+
+"""
+    generate_cpp(input_file, out_dir, namespace_name)
+
+Generates a C++17 header from a YAML file and returns its absolute path,
+`out_dir/namespace_name/namespace_name.hpp`. Included YAML files are resolved relative to
+the file containing the include. The header contains all nested namespaces and requires
+Eigen headers when numeric array fields are present.
+
+Fields use the same storage order as Julia generation. Arrays use built-in fixed storage,
+with Eigen views for numeric arrays. Constructors accept arguments in declaration order.
+Invalid definitions raise an `ArgumentError` before the header is written.
+"""
+function generate_cpp(
+    input_file::AbstractString,
+    out_dir::AbstractString,
+    namespace_name::AbstractString,
+)
+
+    # Both printers consume the same resolved definitions, including physical field order.
+    name = identifier(namespace_name, "root namespace")
+    namespace = parse_file(input_file, [name], Dict{String, TypeDefinition}(), String[])
+    return write_cpp(namespace, out_dir)
+
+end
+
+"""
+    generate_cpp(definitions::AbstractDict, out_dir, namespace_name; base_dir = pwd())
+
+Generates a C++17 header from a namespace dictionary and returns its absolute path.
+`base_dir` is the directory for included YAML files. Dictionary iteration order determines
+declaration and positional constructor order; an `OrderedDict` can specify that order.
+
+Integer enum values supplied directly in the dictionary may use the full range of their
+declared type, including `UInt64`. Values loaded from YAML remain limited by YAML parsing.
+"""
+function generate_cpp(
+    definitions::AbstractDict,
+    out_dir::AbstractString,
+    namespace_name::AbstractString;
+    base_dir::AbstractString = pwd(),
+)
+
+    # Dictionary inputs bypass YAML loading but share all type and layout validation.
+    name = identifier(namespace_name, "root namespace")
+    namespace = parse_namespace(
+        definitions,
+        [name],
+        abspath(base_dir),
+        Dict{String, TypeDefinition}(),
+        String[],
+    )
+    return write_cpp(namespace, out_dir)
 
 end
 
