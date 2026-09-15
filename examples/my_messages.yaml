@@ -17,5 +17,5 @@ namespaces:
       Navigation:
         messages:
           NavInputs:
-            barometer_measurement: Sensors.BarometerMeasurement
+            barometer_measurement: Sensors.Barometer.BarometerMeasurement
             gnss_measurement: Sensors.GNSS.GNSSMeasurement
