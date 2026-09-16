@@ -2,14 +2,24 @@
 # This keeps YAML traversal and memory-layout decisions out of the language-specific
 # printer. Only completed enum and message definitions enter the shared type table.
 
-# Every field type needs a name, size, and alignment. Primitive names use IDL spelling;
-# enum and message names include the root namespace so references are unambiguous.
+# Lengths are either positive integer literals or names scoped to a message. Layouts may
+# additionally contain small arithmetic trees built by this parser, never parsed Julia
+# code. Keeping symbolic sizes lets one definition describe every template instantiation.
+const Length = Union{Int, Symbol}
+const LayoutSize = Union{Int, Symbol, Expr}
+
+# Every field type needs a name, size, and alignment. Arguments identify an instantiated
+# message; alignment is independent of positive lengths, even through nested messages.
 struct TypeDefinition
     name::String
     kind::Symbol
-    size::Int
+    size::LayoutSize
     alignment::Int
+    arguments::Vector{Length}
 end
+
+TypeDefinition(name, kind, size, alignment) =
+    TypeDefinition(name, kind, size, alignment, Length[])
 
 # Retain the declared integer type and values so the printer can reproduce the enum
 # without inspecting a generated Julia type. BigInt accommodates every supported width.
@@ -24,8 +34,9 @@ end
 struct FieldDefinition
     name::String
     type::TypeDefinition
-    dimensions::Vector{Int}
-    size::Int
+    dimensions::Vector{Length}
+    size::LayoutSize
+    description::String
 end
 
 # Fields stay in declaration order for constructors. A separate permutation describes
@@ -34,6 +45,8 @@ struct MessageDefinition
     type::TypeDefinition
     fields::Vector{FieldDefinition}
     storage_order::Vector{Int}
+    parameters::Vector{String}
+    description::String
 end
 
 # The namespace tree also determines the output directory tree. Each section preserves
@@ -84,7 +97,7 @@ function invalid(context, message)
 end
 
 # Names become source identifiers and directory names. Validate them before printing
-# rather than escaping arbitrary input differently for Julia and a future C++ generator.
+# rather than escaping arbitrary input differently for the Julia and C++ generators.
 function identifier(value, context)
 
     valid = value isa AbstractString && occursin(r"^[A-Za-z][A-Za-z0-9_]*$", value) &&
@@ -200,92 +213,204 @@ function parse_enum(name, definitions, context)
 
 end
 
-# A field string combines a type reference with optional dimensions. Splitting these here
-# gives the printer an already-resolved element type and a checked total storage size.
-function parse_field(name, specification, path, types)
+# Symbolic layout arithmetic has only addition, multiplication, and alignment rounding.
+# Fold concrete expressions with BigInt first so generation cannot silently overflow Int.
+function layout_expression(operation, arguments...)
 
-    # Accept only the IDL grammar: a dotted name followed by optional brackets. Type
-    # strings are never evaluated as Julia expressions.
+    if all(value -> value isa Int, arguments)
+
+        values = BigInt.(arguments)
+        result = operation == :+ ? sum(values) : operation == :* ? prod(values) :
+            cld(values[1], values[2]) * values[2]
+        0 <= result <= typemax(Int) || invalid("layout", "size exceeds Int range")
+        return Int(result)
+
+    end
+
+    # These identities keep nested layouts readable in the generated assertions.
+    operation == :round && arguments[2] == 1 && return arguments[1]
+    identity = operation == :+ ? 0 : 1
+    if operation in (:+, :*)
+
+        terms = filter(value -> value != identity, collect(arguments))
+        isempty(terms) && return identity
+        length(terms) == 1 && return only(terms)
+        return Expr(:call, operation, terms...)
+
+    end
+    return Expr(:call, operation, arguments...)
+
+end
+
+# Substitute arguments into a previously declared message's size. The same operation
+# handles concrete use (Child{4}) and parameter forwarding (Child{N}) without evaluation.
+function substitute_size(value, arguments)
+
+    value isa Int && return value
+    value isa Symbol && return arguments[value]
+    terms = [substitute_size(term, arguments) for term in value.args[2:end]]
+    return layout_expression(value.args[1], terms...)
+
+end
+
+# Descriptions are data, not source code. Printers escape them for their own language.
+function description(definitions, context)
+
+    value = get(definitions, "description", "")
+    value isa AbstractString || invalid(context, "description must be a string")
+    return String(value)
+
+end
+
+# Parameters currently represent lengths only. An explicit int64 declaration keeps the
+# C++ template signature predictable; every use must also fit the host's positive Int.
+function parse_parameters(definitions, path)
+
+    context = join(path, ".")
+    entries = mapping(get(definitions, "parameters", OrderedDict()), context)
+    parameters = String[]
+    for (name, type) in entries
+
+        name = identifier(name, context)
+        (name in path || haskey(PRIMITIVES, name)) &&
+            invalid(context, "parameter name $name conflicts with a type or namespace")
+        type == "int64" || invalid(context, "length parameters must declare int64")
+        push!(parameters, name)
+
+    end
+    return parameters
+
+end
+
+# A dimension or template argument is one literal or one declared length parameter.
+# Deliberately omit expressions and defaults, so names cannot introduce executable code.
+function parse_length(text, parameters, context)
+
+    text = strip(text)
+    occursin(r"^[0-9]+$", text) && return checked_size(parse(BigInt, text), context)
+    text in parameters && return Symbol(text)
+    invalid(context, "expected a positive length or declared parameter, got $(repr(text))")
+
+end
+
+# Fields accept a type string or a dictionary with a type and optional documentation.
+# Resolve the element separately from its surrounding array shape, retaining arguments
+# so both printers can reproduce concrete and parameter-forwarding message references.
+function parse_field(name, specification, path, types, parameters)
+
     context = join([path; name], ".")
+    documentation = ""
+    if specification isa AbstractDict
+
+        check_keys(specification, ("type", "description"), context)
+        documentation = description(specification, context)
+        specification = get(specification, "type", nothing)
+
+    end
     specification isa AbstractString || invalid(context, "expected a type string")
     parsed = match(
-        r"^([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*)(?:\[([^\]]*)\])?$",
+        r"^([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*)(?:\{([^{}]*)\})?(?:\[([^\]]*)\])?$",
         strip(specification),
     )
     isnothing(parsed) && invalid(context, "invalid type $(repr(specification))")
-    reference, dimensions_text = parsed.captures
+    reference, arguments_text, dimensions_text = parsed.captures
+    arguments = Length[]
+    if !isnothing(arguments_text)
+        append!(arguments, [parse_length(part, parameters, context) for
+            part in split(arguments_text, ',')])
+    end
 
-    # Bare references are local; dotted references start at the root namespace. path
-    # includes the message name, which is removed when constructing a local type name.
+    # The shared table contains completed declarations only. A bare name is local, while
+    # a dotted name starts at the root; a reference cannot silently hide a parameter.
+    reference in parameters && invalid(context, "a length parameter is not a field type")
     if haskey(PRIMITIVES, reference)
+
         type = primitive_type(reference)
+        isempty(arguments) || invalid(context, "primitive types do not take parameters")
+
     else
+
         qualified = occursin('.', reference) ? path[1] * "." * reference :
             join([path[1:end-1]; reference], ".")
         haskey(types, qualified) ||
             invalid(context, "type $reference is not previously defined")
-        type = types[qualified]
-    end
+        definition = types[qualified]
+        if definition isa MessageDefinition
 
-    # No brackets means a scalar field. Otherwise, retain one or two positive dimensions
-    # so the printer can distinguish vectors from matrices without reparsing the string.
-    dimensions = Int[]
-    if !isnothing(dimensions_text)
+            expected = length(definition.parameters)
+            length(arguments) == expected ||
+                invalid(context, "$reference expects $expected parameters")
+            substitutions = Dict(Symbol(key) => value for
+                (key, value) in zip(definition.parameters, arguments))
+            resolved_size = substitute_size(definition.type.size, substitutions)
+            type = TypeDefinition(
+                qualified,
+                :message,
+                resolved_size,
+                definition.type.alignment,
+                arguments,
+            )
 
-        parts = split(dimensions_text, ',')
-        length(parts) in (1, 2) ||
-            invalid(context, "only vectors and matrices are supported")
-        for part in parts
+        else
 
-            occursin(r"^[0-9]+$", strip(part)) ||
-                invalid(context, "invalid array dimension")
-            push!(dimensions, checked_size(parse(BigInt, strip(part)), context))
+            isempty(arguments) || invalid(context, "enums do not take parameters")
+            type = definition
 
         end
 
     end
 
-    # Multiplying by the complete element size includes padding within nested messages.
-    size = checked_size(prod(BigInt.(dimensions); init = BigInt(type.size)), context)
-    return FieldDefinition(name, type, dimensions, size)
+    # Positive dimensions preserve element alignment. Matrix dimensions are currently
+    # literal: SMatrix requires its total length in the Julia field type as well.
+    dimensions = Length[]
+    if !isnothing(dimensions_text)
+
+        parts = split(dimensions_text, ',')
+        length(parts) in (1, 2) ||
+            invalid(context, "only vectors and matrices are supported")
+        append!(dimensions, [parse_length(part, parameters, context) for part in parts])
+        length(dimensions) == 2 && any(value -> value isa Symbol, dimensions) &&
+            invalid(context, "matrix dimensions must be literal integers for now")
+
+    end
+    size = layout_expression(:*, type.size, dimensions...)
+    return FieldDefinition(name, type, dimensions, size, documentation)
 
 end
 
-# Resolve fields in declaration order, then calculate a separate physical layout. The
-# resulting message type can be registered for use in subsequent messages and arrays.
+# Resolve fields in YAML order and sort only by alignment. Positive length parameters do
+# not change alignment, so Julia and C++ can share one field order for all instantiations.
 function parse_message(name, definitions, path, types)
 
-    # Constructor arguments keep this order even when their corresponding fields move.
     context = join(path, ".")
     definitions = mapping(definitions, context)
-    isempty(definitions) && invalid(context, "empty messages are not supported")
+    check_keys(definitions, ("description", "parameters", "fields"), context)
+    documentation = description(definitions, context)
+    parameters = parse_parameters(definitions, path)
+    entries = mapping(get(definitions, "fields", nothing), "$context.fields")
+    isempty(entries) && invalid(context, "empty messages are not supported")
     fields = FieldDefinition[]
-    for (key, specification) in definitions
+    for (key, specification) in entries
 
         key = identifier(key, context)
         key == name && invalid(context, "field name $key conflicts with its constructor")
-        push!(fields, parse_field(key, specification, path, types))
+        key in parameters && invalid(context, "field name $key conflicts with a parameter")
+        push!(fields, parse_field(key, specification, path, types, parameters))
 
     end
-
-    # Larger alignment requirements come first; size breaks alignment ties. The original
-    # index then keeps equally sized and aligned fields in a predictable order.
     order = sortperm(
         eachindex(fields);
-        by = index -> (-fields[index].type.alignment, -fields[index].size, index),
+        by = index -> (-fields[index].type.alignment, index),
     )
 
-    # Round up to each field's alignment before placing it. The final rounding includes
-    # trailing padding, which matters when this message becomes an array element.
+    # A field's size includes its own tail padding. With decreasing power-of-two
+    # alignments, the sum of prior field sizes is already aligned for the next field.
+    # Only the final message size needs rounding, including for arrays of this message.
     alignment = maximum(field.type.alignment for field in fields)
-    size = BigInt(0)
-    for index in order
-        field = fields[index]
-        size = cld(size, field.type.alignment) * field.type.alignment + field.size
-    end
-    size = checked_size(cld(size, alignment) * alignment, context)
+    size = layout_expression(:+, (field.size for field in fields)...)
+    size = layout_expression(:round, size, alignment)
     type = TypeDefinition(context, :message, size, alignment)
-    return MessageDefinition(type, fields, order)
+    return MessageDefinition(type, fields, order, parameters, documentation)
 
 end
 
@@ -334,7 +459,7 @@ function parse_namespace(definitions, path, base_dir, types, stack)
 
                 definition = parse_message(name, entry, child_path, types)
                 push!(namespace.messages, definition)
-                types[qualified] = definition.type
+                types[qualified] = definition
 
             else
 

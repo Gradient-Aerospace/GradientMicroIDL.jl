@@ -22,7 +22,36 @@ const CPP_PRIMITIVES = Dict(
 # that would otherwise hide part of a previously defined type's path.
 function cpp_type(type::TypeDefinition)
     type.kind == :primitive && return CPP_PRIMITIVES[type.name]
-    return "::" * replace(type.name, "." => "::")
+    suffix = isempty(type.arguments) ? "" : "<" * join(type.arguments, ", ") * ">"
+    return "::" * replace(type.name, "." => "::") * suffix
+end
+
+# Layout expressions come exclusively from the shared parser. C++ uses integer division
+# for rounding up; no user-supplied expression is copied into the generated source.
+function cpp_size(value)
+
+    value isa Expr || return string(value)
+    operation = value.args[1]
+    terms = cpp_size.(value.args[2:end])
+    if operation == :round
+        value, alignment = terms
+        return "((($value + $alignment - 1) / $alignment) * $alignment)"
+    end
+    return "(" * join(terms, operation == :+ ? " + " : " * ") * ")"
+
+end
+
+# Escape the block-comment terminator in prose so documentation cannot become C++ code.
+# Documentation comments keep message and member descriptions beside their declarations.
+function print_cpp_description(io, text, indent)
+
+    isempty(text) && return
+    println(io, indent, "/**")
+    for line in split(replace(text, "*/" => "* /"), '\n')
+        println(io, indent, " * ", line)
+    end
+    println(io, indent, " */")
+
 end
 
 # Decimal literals need suffixes to cover UInt64. The minimum Int64 needs special spelling:
@@ -49,6 +78,9 @@ function validate_cpp(namespace)
     for message in namespace.messages
 
         names = Set(field.name for field in message.fields)
+        union!(names, message.parameters)
+        "Matrix" in message.parameters &&
+            invalid(message.type.name, "parameter Matrix conflicts with an Eigen alias")
         name = last(split(message.type.name, '.'))
         for field in message.fields
 
@@ -63,7 +95,8 @@ function validate_cpp(namespace)
 
             # Eigen's fixed dimensions and compile-time element counts use int, even on
             # hosts whose Julia Int is wider. Plain nonnumeric arrays have no such limit.
-            prod(field.dimensions) <= typemax(Int32) ||
+            count = layout_expression(:*, field.dimensions...)
+            count isa Int && count > typemax(Int32) &&
                 invalid(message.type.name, "Eigen array dimensions exceed its int range")
             needs_eigen = true
 
@@ -100,7 +133,19 @@ function print_cpp_constructor(io, message, indent)
     name = last(split(message.type.name, '.'))
     fields = message.fields
     println(io, indent, "// Value-initialize fields when no arguments are supplied.")
-    println(io, indent, "$name() = default;\n")
+    if isempty(message.parameters)
+
+        println(io, indent, "$name() = default;\n")
+
+    else
+
+        # A class is complete inside its constructor body. Template layout checks cannot
+        # use sizeof/offsetof directly in the still-incomplete class declaration.
+        println(io, indent, "$name() {")
+        print_cpp_layout(io, message, indent * "    ")
+        println(io, indent, "}\n")
+
+    end
     println(io, indent, "// Arguments use input order; initializers use storage order.")
     println(io, indent, "explicit $name(")
     for (index, field) in enumerate(fields)
@@ -108,7 +153,8 @@ function print_cpp_constructor(io, message, indent)
         type = cpp_type(field.type)
         argument = field.name
         if !isempty(field.dimensions)
-            parameter = "const $type (&$argument)[$(prod(field.dimensions))]"
+            count = cpp_size(layout_expression(:*, field.dimensions...))
+            parameter = "const $type (&$argument)[$count]"
         elseif field.type.kind == :message
             parameter = "const $type& $argument"
         else
@@ -132,10 +178,11 @@ function print_cpp_constructor(io, message, indent)
 
     end
     println(io, indent, "{")
+    isempty(message.parameters) || print_cpp_layout(io, message, indent * "    ")
     for field in fields
 
         isempty(field.dimensions) && continue
-        count = prod(field.dimensions)
+        count = cpp_size(layout_expression(:*, field.dimensions...))
         println(
             io,
             indent,
@@ -189,17 +236,18 @@ function print_cpp_layout(io, message, indent)
     name = last(split(message.type.name, '.'))
     println(io, indent, "static_assert(::std::is_standard_layout_v<$name>);")
     println(io, indent, "static_assert(::std::is_trivially_copyable_v<$name>);")
-    println(io, indent, "static_assert(sizeof($name) == $(message.type.size));")
+    println(io, indent, "static_assert(sizeof($name) == $(cpp_size(message.type.size)));")
     println(io, indent, "static_assert(alignof($name) == $(message.type.alignment));")
 
-    # Include padding when calculating offsets, just as the shared parser does for size.
+    # Decreasing alignment removes inter-field padding. Each field size already includes
+    # any tail padding inside a nested message, so offsets are simply cumulative sizes.
     offset = 0
     for index in message.storage_order
 
         field = message.fields[index]
-        offset = cld(offset, field.type.alignment) * field.type.alignment
-        println(io, indent, "static_assert(offsetof($name, $(field.name)) == $offset);")
-        offset += field.size
+        assertion = "static_assert(offsetof($name, $(field.name)) == $(cpp_size(offset)));"
+        println(io, indent, assertion)
+        offset = layout_expression(:+, offset, field.size)
 
     end
     println(io)
@@ -213,13 +261,41 @@ function print_cpp_message(io, message, indent)
 
     name = last(split(message.type.name, '.'))
     member_indent = indent * "    "
+    print_cpp_description(io, message.description, indent)
+    if !isempty(message.parameters)
+
+        parameters = join(["::std::int64_t $name" for name in message.parameters], ", ")
+        println(io, indent, "template <$parameters>")
+
+    end
     println(io, indent, "struct $name {\n")
-    println(io, member_indent, "// Storage order is decreasing alignment, then size.")
+    for parameter in message.parameters
+
+        condition = "$parameter > 0 && $parameter <= $(typemax(Int))"
+        println(io, member_indent, "static_assert(")
+        println(io, member_indent, "    $condition, \"length must fit a positive Int\"")
+        println(io, member_indent, ");")
+
+    end
+    for field in message.fields
+
+        has_eigen_view(field) || continue
+        count = layout_expression(:*, field.dimensions...)
+        count isa Int && continue
+        condition = "$(cpp_size(count)) <= $(typemax(Int32))"
+        println(io, member_indent, "static_assert(")
+        println(io, member_indent, "    $condition, \"Eigen length exceeds int range\"")
+        println(io, member_indent, ");")
+
+    end
+    println(io, member_indent, "// Decreasing alignment; declaration order breaks ties.")
     for index in message.storage_order
 
         field = message.fields[index]
         type = cpp_type(field.type)
-        shape = isempty(field.dimensions) ? "" : "[$(prod(field.dimensions))]"
+        count = cpp_size(layout_expression(:*, field.dimensions...))
+        shape = isempty(field.dimensions) ? "" : "[$count]"
+        print_cpp_description(io, field.description, member_indent)
         println(io, member_indent, "$type $(field.name)$shape{};")
 
     end
@@ -229,7 +305,7 @@ function print_cpp_message(io, message, indent)
         has_eigen_view(field) && print_cpp_view(io, field, member_indent)
     end
     println(io, indent, "};\n")
-    print_cpp_layout(io, message, indent)
+    isempty(message.parameters) && print_cpp_layout(io, message, indent)
 
 end
 

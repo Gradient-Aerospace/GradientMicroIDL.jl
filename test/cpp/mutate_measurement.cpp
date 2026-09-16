@@ -2,13 +2,13 @@
 // and Eigen templates. Only the callable function below needs C linkage.
 #include "MyMessages/MyMessages.hpp"
 
-using MyMessages::Sensors::GNSS::GNSSMeasurement;
+using MyMessages::Sensors::GNSS::GNSSPositionMeasurement;
 
 extern "C" {
 
 // Translate the measured position by a known offset. The pointer borrows storage from
 // Julia; the Eigen view writes directly into that storage without copying the vector.
-void translate_position(GNSSMeasurement* measurement) {
+void translate_position(GNSSPositionMeasurement* measurement) {
 
     auto position = measurement->position_ecef_eigen();
     position(0) += 10.0;

@@ -33,35 +33,33 @@ end
             @test all(name -> name in names(root), (:Common, :Sensors, :GNC))
             @test sizeof(gnss.GNSSFixType.T) == 1
             @test UInt8(gnss.GNSSFixType.fix_3d) == 3
-            @test isbitstype(gnss.GNSSMeasurement)
+            @test isbitstype(gnss.GNSSPositionMeasurement)
             @test isbitstype(root.GNC.Navigation.NavInputs)
 
-            # YAML lists weeks first, but storage puts microseconds first for alignment.
-            # Both constructors must keep that distinction and convert ordinary integers.
+            # Equal-alignment fields retain YAML order. Both constructors convert ordinary
+            # integers to the declared widths.
             timestamp = gnss.GNSSTimeStamp(2, 30)
-            keyword_timestamp = gnss.GNSSTimeStamp(; weeks = 2, microseconds = 30)
+            keyword_timestamp = gnss.GNSSTimeStamp(; weeks = 2, milliseconds = 30)
             @test timestamp === keyword_timestamp
-            @test timestamp.weeks === UInt16(2)
-            @test timestamp.microseconds === UInt64(30)
-            @test fieldnames(gnss.GNSSTimeStamp) == (:microseconds, :weeks)
+            @test timestamp.weeks === UInt32(2)
+            @test timestamp.milliseconds === UInt32(30)
+            @test fieldnames(gnss.GNSSTimeStamp) == (:weeks, :milliseconds)
 
             # Build a complete measurement to check that enum, message, vector, and
             # matrix fields can be supplied together through the keyword constructor.
             position = SVector(1.0, 2.0, 3.0)
             covariance = SMatrix{3, 3}(1.0:9.0)
-            measurement = gnss.GNSSMeasurement(;
+            measurement = gnss.GNSSPositionMeasurement(;
                 timestamp,
                 fix_type                 = gnss.GNSSFixType.fix_3d,
                 position_ecef            = position,
-                velocity_ecef            = -position,
                 position_covariance_ecef = covariance,
-                velocity_covariance_ecef = covariance,
             )
             @test measurement.position_ecef === position
             @test measurement.position_covariance_ecef === covariance
 
             # Navigation combines messages from sibling namespaces. This also checks
-            # positional construction when the larger GNSS field moves ahead of barometer.
+            # positional construction when equal-alignment messages retain YAML order.
             local_time = root.Common.LocalTimeStamp(123)
             barometer = root.Sensors.Barometer.BarometerMeasurement(
                 local_time,
@@ -95,14 +93,18 @@ end
         ),
         "messages" => OrderedDict(
             "Packet" => OrderedDict(
-                "bytes"  => "char[9]",
-                "first"  => "uint64",
-                "second" => "uint64",
-                "matrix" => "float32[2,3]",
+                "fields" => OrderedDict(
+                    "bytes"  => "char[9]",
+                    "first"  => "uint64",
+                    "second" => "uint64",
+                    "matrix" => "float32[2,3]",
+                ),
             ),
             "Container" => OrderedDict(
-                "packets" => "Packet[2]",
-                "status"  => "Status[2]",
+                "fields" => OrderedDict(
+                    "packets" => "Packet[2]",
+                    "status"  => "Status[2]",
+                ),
             ),
         ),
         "namespaces" => OrderedDict(
@@ -168,10 +170,14 @@ end
             definitions = OrderedDict(
                 "messages" => OrderedDict(
                     "Packet" => OrderedDict(
-                        "value" => specification,
+                        "fields" => OrderedDict(
+                            "value" => specification,
+                        ),
                     ),
                     "Later" => OrderedDict(
-                        "value" => "int8",
+                        "fields" => OrderedDict(
+                            "value" => "int8",
+                        ),
                     ),
                 ),
             )
@@ -209,7 +215,9 @@ end
                 "Child" => OrderedDict(
                     "messages" => OrderedDict(
                         "Child" => OrderedDict(
-                            "value" => "int8",
+                            "fields" => OrderedDict(
+                                "value" => "int8",
+                            ),
                         ),
                     ),
                 ),

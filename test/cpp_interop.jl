@@ -156,7 +156,10 @@ function test_compiled(root, example, directory, compiler, eigen)
             example.Sensors.Barometer.BarometerMeasurement,
         "::MyMessages::Sensors::GNSS::GNSSFixType" => gnss.GNSSFixType.T,
         "::MyMessages::Sensors::GNSS::GNSSTimeStamp" => gnss.GNSSTimeStamp,
-        "::MyMessages::Sensors::GNSS::GNSSMeasurement" => gnss.GNSSMeasurement,
+        "::MyMessages::Sensors::GNSS::GNSSPositionMeasurement" =>
+            gnss.GNSSPositionMeasurement,
+        "::MyMessages::Sensors::GNSS::LatitudeLongitudeAltitudeWGS84" =>
+            gnss.LatitudeLongitudeAltitudeWGS84,
         "::MyMessages::GNC::Navigation::NavInputs" => example.GNC.Navigation.NavInputs,
         "::Interop::Signed" => root.Signed.T,
         "::Interop::Unsigned" => root.Unsigned.T,

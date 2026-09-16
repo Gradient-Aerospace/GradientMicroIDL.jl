@@ -30,7 +30,12 @@ function generate_julia(
     # The type table and include stack belong to this generation only. parse_file keeps
     # the root file on the stack while resolving children, so includes back to it fail.
     name = identifier(module_name, "root module")
-    namespace = parse_file(input_file, [name], Dict{String, TypeDefinition}(), String[])
+    namespace = parse_file(
+        input_file,
+        [name],
+        Dict{String, Union{TypeDefinition, MessageDefinition}}(),
+        String[],
+    )
 
     # No files are written until the complete namespace tree has been validated.
     return write_julia(namespace, out_dir)
@@ -45,8 +50,9 @@ path to the root module file. `base_dir` is the directory for included YAML file
 
 Dictionary iteration order determines declaration and positional constructor order.
 An `OrderedDict` can be used to specify that order explicitly. Fields are stored in
-decreasing alignment and size order, while both positional and keyword constructors use
-the declared field names and order.
+decreasing alignment order, with declaration order breaking ties. Both positional and
+keyword constructors use the declared field names and order. Message descriptions become
+docstrings; length parameters produce explicitly parameterized constructors.
 """
 function generate_julia(
     definitions::AbstractDict,
@@ -62,7 +68,7 @@ function generate_julia(
         definitions,
         [name],
         abspath(base_dir),
-        Dict{String, TypeDefinition}(),
+        Dict{String, Union{TypeDefinition, MessageDefinition}}(),
         String[],
     )
 
@@ -91,7 +97,12 @@ function generate_cpp(
 
     # Both printers consume the same resolved definitions, including physical field order.
     name = identifier(namespace_name, "root namespace")
-    namespace = parse_file(input_file, [name], Dict{String, TypeDefinition}(), String[])
+    namespace = parse_file(
+        input_file,
+        [name],
+        Dict{String, Union{TypeDefinition, MessageDefinition}}(),
+        String[],
+    )
     return write_cpp(namespace, out_dir)
 
 end
@@ -119,7 +130,7 @@ function generate_cpp(
         definitions,
         [name],
         abspath(base_dir),
-        Dict{String, TypeDefinition}(),
+        Dict{String, Union{TypeDefinition, MessageDefinition}}(),
         String[],
     )
     return write_cpp(namespace, out_dir)

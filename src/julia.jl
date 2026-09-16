@@ -1,11 +1,12 @@
 # This file prints the resolved namespace tree; it does not load YAML or decide layout.
-# Keeping Julia spelling here leaves the parser's records useful to a later C++ printer.
+# The C++ printer consumes the same records, including parameter-independent field order.
 
 # Primitive names need translation to Julia, while enum modules expose their type as T.
 # Qualifying references avoids depending on exports or on which other names are in scope.
 function julia_type(type::TypeDefinition)
     type.kind == :primitive && return "Base.$(PRIMITIVES[type.name])"
-    return type.kind == :enum ? type.name * ".T" : type.name
+    suffix = isempty(type.arguments) ? "" : "{" * join(type.arguments, ", ") * "}"
+    return type.kind == :enum ? type.name * ".T" : type.name * suffix
 end
 
 # Apply the array shape only at the field level. The resolved type describes the element,
@@ -37,10 +38,10 @@ end
 
 # Signatures and constructor calls share the same wrapping rule. prefix includes the
 # opening parenthesis; indentation places the closing parenthesis when the call wraps.
-function print_arguments(io, prefix, arguments, indentation)
+function print_arguments(io, prefix, arguments, indentation; suffix = "")
 
     # Keep small constructors compact and wrap the longer message interfaces.
-    line = prefix * join(arguments, ", ") * ")"
+    line = prefix * join(arguments, ", ") * ")" * suffix
     if length(line) <= 92
 
         println(io, line)
@@ -51,9 +52,21 @@ function print_arguments(io, prefix, arguments, indentation)
         for argument in arguments
             println(io, indentation, "    ", argument, ",")
         end
-        println(io, indentation, ")")
+        println(io, indentation, ")", suffix)
 
     end
+
+end
+
+# Triple-quoted docstrings keep generated documentation readable. Escape each source
+# line as a Julia string first, so quotes, backslashes, and dollar signs remain prose.
+function print_julia_description(io, text, indent)
+
+    println(io, indent, "\"\"\"")
+    for line in split(chomp(text), '\n')
+        println(io, indent, chop(repr(line); head = 1, tail = 1))
+    end
+    println(io, indent, "\"\"\"")
 
 end
 
@@ -66,10 +79,21 @@ function print_message(io, definition)
     name = last(split(definition.type.name, '.'))
     arguments = [field.name for field in definition.fields]
     stored = [definition.fields[index].name for index in definition.storage_order]
-    println(io, "struct $name\n")
-    println(io, "    # Fields are stored in decreasing alignment and size order.")
+    parameters = definition.parameters
+    suffix = isempty(parameters) ? "" : "{" * join(parameters, ", ") * "}"
+    constructor = name * suffix
+    where_clause = isempty(parameters) ? "" : " where " * suffix
+
+    # A type docstring also lets Julia register docstrings attached to individual fields.
+    documented_fields = any(field -> !isempty(field.description), definition.fields)
+    if !isempty(definition.description) || documented_fields
+        print_julia_description(io, definition.description, "")
+    end
+    println(io, "struct $constructor\n")
+    println(io, "    # Decreasing alignment; declaration order breaks ties.")
     for index in definition.storage_order
         field = definition.fields[index]
+        isempty(field.description) || print_julia_description(io, field.description, "    ")
         println(io, "    $(field.name)::$(julia_type(field))")
     end
 
@@ -77,16 +101,31 @@ function print_message(io, definition)
     # new converts each argument to its declared field type after the arguments reorder.
     println(io)
     println(io, "    # Positional arguments follow the declaration order in the input.")
-    print_arguments(io, "    function $name(", arguments, "    ")
-    print_arguments(io, "        return new(", stored, "        ")
+    print_arguments(
+        io,
+        "    function $constructor(",
+        arguments,
+        "    ";
+        suffix = where_clause,
+    )
+    for parameter in parameters
+
+        condition = "$parameter isa Base.Int64 && 0 < $parameter <= Base.typemax(Base.Int)"
+        message = repr("$parameter must be a positive Int64 length")
+        error = "Base.ArgumentError($message)"
+        println(io, "        $condition ||")
+        println(io, "            Base.throw($error)")
+
+    end
+    print_arguments(io, "        return new$suffix(", stored, "        ")
     println(io, "    end\n")
     println(io, "end\n")
 
     # Delegating keyword construction keeps its conversions identical to the positional
     # constructor, rather than emitting a second independent field-initialization path.
     println(io, "# Keyword arguments use the positional constructor's conversions.")
-    print_arguments(io, "function $name(; ", arguments, "")
-    print_arguments(io, "    return $name(", arguments, "    ")
+    print_arguments(io, "function $constructor(; ", arguments, ""; suffix = where_clause)
+    print_arguments(io, "    return $constructor(", arguments, "    ")
     println(io, "end\n")
 
 end

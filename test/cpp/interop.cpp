@@ -131,19 +131,16 @@ extern "C" int check_constructors() {
     using namespace MyMessages::Sensors::GNSS;
     const GNSSTimeStamp timestamp{2, 30};
     double position[3] = {1, 2, 3};
-    const double velocity[3] = {-1, -2, -3};
     const double covariance[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
-    GNSSMeasurement measurement{
+    GNSSPositionMeasurement measurement{
         timestamp,
         GNSSFixType::fix_3d,
         position,
-        velocity,
-        covariance,
         covariance,
     };
     position[0] = 99;
     if (measurement.position_ecef[0] != 1 || measurement.timestamp.weeks != 2 ||
-        measurement.timestamp.microseconds != 30 ||
+        measurement.timestamp.milliseconds != 30 ||
         measurement.fix_type != GNSSFixType::fix_3d) {
         return __LINE__;
     }

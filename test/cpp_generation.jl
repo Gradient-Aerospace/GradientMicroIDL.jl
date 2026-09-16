@@ -26,22 +26,22 @@ const EXAMPLE = joinpath(@__DIR__, "..", "examples", "my_messages.yaml")
             source,
         )
         @test occursin(
-            "::MyMessages::Sensors::GNSS::GNSSMeasurement gnss_measurement{};",
+            "::MyMessages::Sensors::GNSS::GNSSPositionMeasurement gnss_measurement{};",
             source,
         )
 
         # Earlier namespaces must appear before the types that consume them. The timestamp
-        # constructor takes weeks first even though microseconds occupies the first bytes.
+        # fields retain YAML order because both members have the same alignment.
         common = first(findfirst("namespace Common {", source))
         sensors = first(findfirst("namespace Sensors {", source))
         navigation = first(findfirst("namespace Navigation {", source))
         @test common < sensors < navigation
-        @test occursin("::std::uint16_t weeks,", source)
-        @test occursin("::std::uint64_t microseconds\n", source)
-        @test occursin(": microseconds{microseconds},", source)
-        @test occursin("weeks{weeks}", source)
-        @test occursin("static_assert(sizeof(GNSSTimeStamp) == 16);", source)
-        @test occursin("static_assert(offsetof(GNSSTimeStamp, weeks) == 8);", source)
+        @test occursin("::std::uint32_t weeks,", source)
+        @test occursin("::std::uint32_t milliseconds\n", source)
+        @test occursin(": weeks{weeks},", source)
+        @test occursin("milliseconds{milliseconds}", source)
+        @test occursin("static_assert(sizeof(GNSSTimeStamp) == 8);", source)
+        @test occursin("static_assert(offsetof(GNSSTimeStamp, weeks) == 0);", source)
 
         # Arrays remain plain storage; views are methods, not additional data members.
         @test occursin("double position_ecef[3]{};", source)
@@ -87,16 +87,20 @@ end
         ),
         "messages" => OrderedDict(
             "Item" => OrderedDict(
-                "code" => "uint8",
+                "fields" => OrderedDict(
+                    "code" => "uint8",
+                ),
             ),
             "Packet" => OrderedDict(
-                "bytes"    => "char[9]",
-                "counter"  => "uint64",
-                "matrix"   => "float32[2,3]",
-                "row"      => "float64[1,3]",
-                "column"   => "int16[3,1]",
-                "items"    => "Item[2]",
-                "statuses" => "Signed[2]",
+                "fields" => OrderedDict(
+                    "bytes"    => "char[9]",
+                    "counter"  => "uint64",
+                    "matrix"   => "float32[2,3]",
+                    "row"      => "float64[1,3]",
+                    "column"   => "int16[3,1]",
+                    "items"    => "Item[2]",
+                    "statuses" => "Signed[2]",
+                ),
             ),
         ),
         "namespaces" => OrderedDict(
@@ -129,16 +133,16 @@ end
         @test !occursin("statuses_eigen", source)
         @test occursin("namespace Empty {", source)
 
-        # Layout follows alignment first, size second, and original order for ties. Check
+        # Layout follows alignment, with YAML order breaking ties regardless of size. Check
         # the entire field sequence so a change cannot silently reorder the plain storage.
         members = filter(split(source, '\n')) do line
             occursin(r"^\s+(?:::Shapes::|::std::|float |double ).*\{\};$", line)
         end
         @test strip.(members) == [
             "::std::uint8_t code{};",
+            "::std::uint64_t counter{};",
             "double row[3]{};",
             "::Shapes::Signed statuses[2]{};",
-            "::std::uint64_t counter{};",
             "float matrix[6]{};",
             "::std::int16_t column[3]{};",
             "::std::uint8_t bytes[9]{};",
@@ -164,8 +168,10 @@ end
         definitions = OrderedDict(
             "messages" => OrderedDict(
                 "Packet" => OrderedDict(
-                    "position"       => "float64[3]",
-                    "position_eigen" => "uint8",
+                    "fields" => OrderedDict(
+                        "position"       => "float64[3]",
+                        "position_eigen" => "uint8",
+                    ),
                 ),
             ),
         )
@@ -181,7 +187,9 @@ end
         definitions = OrderedDict(
             "messages" => OrderedDict(
                 "position_eigen" => OrderedDict(
-                    "position" => "float64[3]",
+                    "fields" => OrderedDict(
+                        "position" => "float64[3]",
+                    ),
                 ),
             ),
         )
@@ -196,7 +204,7 @@ end
         # require Eigen, so consumers of scalar interfaces need no Eigen installation.
         write(
             joinpath(directory, "item.yaml"),
-            "messages:\n  Item:\n    value: int32\n",
+            "messages:\n  Item:\n    fields:\n      value: int32\n",
         )
         definitions = OrderedDict(
             "namespaces" => OrderedDict(

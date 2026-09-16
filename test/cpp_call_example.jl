@@ -10,25 +10,28 @@ using .CppTestSetup: cpp_compiler, eigen_include_dir
 
 # Keep the actual call separate from compilation so the example's essential steps are
 # easy to follow. The type parameter supplies the concrete type required by ccall.
-function test_translation(gnss, ::Type{GNSSMeasurement}, library) where GNSSMeasurement
+function test_translation(
+    gnss,
+    ::Type{GNSSPositionMeasurement},
+    library,
+) where GNSSPositionMeasurement
 
     # Construct an ordinary generated Julia value using the included GNSS example.
     covariance = SMatrix{3, 3}(1.0:9.0)
-    measurement = GNSSMeasurement(;
+    measurement = GNSSPositionMeasurement(;
         timestamp                = gnss.GNSSTimeStamp(2, 30),
         fix_type                 = gnss.GNSSFixType.fix_3d,
         position_ecef            = SVector(1.0, 2.0, 3.0),
-        velocity_ecef            = SVector(4.0, 5.0, 6.0),
         position_covariance_ecef = covariance,
-        velocity_covariance_ecef = covariance,
     )
 
     # Ref creates addressable storage for the immutable message. Passing the Ref directly
-    # keeps it alive during ccall; C++ receives a GNSSMeasurement* pointing to its contents.
+    # keeps it alive during ccall; C++ receives a GNSSPositionMeasurement* pointing to
+    # its contents.
     # Cvoid corresponds to C++ void, and the one-element tuple describes the pointer arg.
     storage = Ref(measurement)
     translate_position = dlsym(library, :translate_position)
-    ccall(translate_position, Cvoid, (Ref{GNSSMeasurement},), storage)
+    ccall(translate_position, Cvoid, (Ref{GNSSPositionMeasurement},), storage)
 
     # Read the updated value from the Ref after the call. The original Julia value is
     # unchanged; the storage in the Ref contains the result of the C++ mutation.
@@ -37,9 +40,7 @@ function test_translation(gnss, ::Type{GNSSMeasurement}, library) where GNSSMeas
     @test measurement.position_ecef == SVector(1.0, 2.0, 3.0)
     @test updated.timestamp === measurement.timestamp
     @test updated.fix_type === measurement.fix_type
-    @test updated.velocity_ecef === measurement.velocity_ecef
     @test updated.position_covariance_ecef === measurement.position_covariance_ecef
-    @test updated.velocity_covariance_ecef === measurement.velocity_covariance_ecef
 
 end
 
@@ -72,7 +73,7 @@ end
             Base.invokelatest(messages, library) do root, handle
 
                 gnss = root.Sensors.GNSS
-                test_translation(gnss, gnss.GNSSMeasurement, handle)
+                test_translation(gnss, gnss.GNSSPositionMeasurement, handle)
 
             end
 
