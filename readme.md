@@ -43,6 +43,8 @@ Let's build Julia and C++ definitions for that type. We'll store the outputs in 
 
 ```julia
 using GradientMicroIDL
+import YAML
+
 generate_julia("examples/gnss.yaml", "build/gnss/julia", "GNSS")
 generate_cpp("examples/gnss.yaml", "build/gnss/cpp", "GNSS")
 ```
@@ -478,7 +480,7 @@ Julia itself supports zero-length arrays, but this package rejects zero lengths 
 
 Enums have a required integer `type` and a `values` dictionary, as in the opening GNSS example. Their underlying width is preserved in both languages. Enum values must fit the declared integer type.
 
-YAML.jl parses integer values as Julia `Int`, which is `Int64` on 64-bit systems. Consequently, a `uint64` enum defined in YAML can only specify values from zero through `typemax(Int64)` (9,223,372,036,854,775,807). Values in the upper half of the `UInt64` range cause a parsing overflow; they are not converted or truncated. The dictionary API can supply the full `UInt64` range directly. Included YAML files retain the parsing limitation. This restriction does not affect `uint64` message fields.
+YAML.jl parses integer values as Julia `Int`, which is `Int64` on 64-bit systems. Consequently, a `uint64` enum defined in YAML can only specify values from zero through `typemax(Int64)` (9,223,372,036,854,775,807). Values in the upper half of the `UInt64` range cause a parsing overflow; they are not converted or truncated. Native specifications and the dictionary API can supply the full `UInt64` range directly. The JSON reader also preserves integers throughout this range. Included YAML files retain the parsing limitation. This restriction does not affect `uint64` message fields.
 
 ### Namespaces, includes, and references
 
@@ -517,9 +519,9 @@ Names use ASCII letters and digits with underscores, beginning with a letter. La
 
 ## Generated layout and constructors
 
-Fields are stored in decreasing alignment order, with YAML declaration order breaking ties. Field size does not break ties. Positive lengths do not change array alignment, so this order remains fixed across parameter values, including nested parameterized messages. Native padding is retained, including the trailing padding needed for arrays of structs.
+Fields are stored in decreasing alignment order, with declaration order breaking ties. Field size does not break ties. Positive lengths do not change array alignment, so this order remains fixed across parameter values, including nested parameterized messages. Native padding is retained, including the trailing padding needed for arrays of structs.
 
-Both positional constructors follow YAML field order regardless of physical storage order. Julia also provides keyword constructors; all fields are required, and values are converted to their declared types. A parameterized Julia constructor requires positive `Int64` length arguments. Ordinary Julia types are immutable and `isbits`; parameterized types become concrete `isbits` types when supplied valid lengths.
+Both positional constructors follow declared field order regardless of physical storage order. Julia also provides keyword constructors; all fields are required, and values are converted to their declared types. A parameterized Julia constructor requires positive `Int64` length arguments. Ordinary Julia types are immutable and `isbits`; parameterized types become concrete `isbits` types when supplied valid lengths.
 
 C++ structs have a zero-initializing default constructor and an explicit value constructor. Primitive and enum arguments are passed by value, message arguments by const reference, and array arguments by const reference to a built-in array of the required length. Arrays are copied into the struct's own storage. Constructors do not accept Eigen expressions directly. Zero initialization applies recursively to fields, including enums whose zero value may not have a named enumerator; padding bytes are unspecified.
 
@@ -539,22 +541,67 @@ For calls like the opening example, an initialized Julia `Ref(message)` supplies
 
 ## Generation API and build workflow
 
-Both generators accept a YAML filename, an output directory, and the root module/namespace name:
+The native input is a `NamespaceSpec`, built from ordinary Julia objects. These objects describe declarations; they do not contain calculated sizes, alignments, or resolved references. For example, we can describe a controller directly:
 
 ```julia
 using GradientMicroIDL
 
-julia_file = generate_julia("examples/messages.yaml", "build/messages/julia", "MyMessages")
-cpp_header = generate_cpp("examples/messages.yaml", "build/messages/cpp", "MyMessages")
+specification = NamespaceSpec(;
+    messages = [
+        MessageSpec(
+            "MotorParameters";
+            fields = [
+                FieldSpec("position", "float64[3]"),
+                FieldSpec("torque_constant", "float64"),
+            ],
+        ),
+        MessageSpec(
+            "ControlParameters";
+            description = "Parameters for a controller with N motors.",
+            parameters = [ParameterSpec("N")],
+            fields = [
+                FieldSpec("num_motors", "uint32"),
+                FieldSpec("motors", "MotorParameters[N]"; description = "In command order."),
+            ],
+        ),
+    ],
+)
+
+julia_file = generate_julia(specification, "build/control/julia", "Control")
+cpp_header = generate_cpp(specification, "build/control/cpp", "Control")
 ```
 
-Julia produces `build/messages/julia/MyMessages/MyMessages.jl` and one file per nested module. C++ produces a single self-contained C++17 header at `build/messages/cpp/MyMessages/MyMessages.hpp`. Each function returns the absolute path to its root file. Definitions are validated and rendered before output is written. Generated paths are overwritten; unrelated files are left alone.
+Vectors preserve declaration order. `EnumSpec("Mode", "uint8", ["idle" => 0, "active" => 1])` declares an enum. Child namespaces use ordered pairs, such as `NamespaceSpec(; namespaces = ["Controllers" => specification])`. A child can instead be an `IncludeSpec("control.yaml")` or `IncludeSpec("control.json")`; the generators' `base_dir` keyword locates includes in directly constructed specifications and defaults to `pwd()`.
 
-Dictionary overloads accept the same schema: `generate_julia(definitions, out_dir, module_name; base_dir = pwd())` and `generate_cpp(definitions, out_dir, namespace_name; base_dir = pwd())`. Dictionary iteration order determines declaration and constructor order; `OrderedDict` makes that order explicit. `base_dir` controls the location of files included by the dictionary.
+`NamespaceSpec(definitions)` converts a dictionary using the schema described above. The generators also accept dictionaries directly as a convenience. Dictionary iteration order determines declaration and constructor order; `OrderedDict` makes that order explicit. Dictionary conversion checks structure, while generation checks names, references, parameter usage, and layouts for all input paths before writing files.
+
+### Optional YAML and JSON readers
+
+File readers are Julia package extensions. The generation environment needs the corresponding package installed and loaded: `import YAML` for `.yaml` and `.yml`, or `import JSON` for `.json`. Native specifications and dictionaries do not require either reader. Both file readers preserve declaration order and reject duplicate keys. When creating JSON with other tools, their serializers must also preserve the intended member order.
+
+Both generators accept a filename, or we can load a specification once and reuse it:
+
+```julia
+using GradientMicroIDL
+import YAML
+
+specification = load_specification("examples/messages.yaml")
+julia_file = generate_julia(specification, "build/messages/julia", "MyMessages")
+cpp_header = generate_cpp(specification, "build/messages/cpp", "MyMessages")
+
+# The filename overload is a shorthand for loading and then generating.
+generate_julia("examples/messages.yaml", "build/messages/julia", "MyMessages")
+```
+
+`load_specification` expands includes relative to each containing file and retains source filenames for error messages. Includes can mix formats when both reader packages are loaded. The returned tree can be reused without reading those files again. File suffixes select the reader; unrecognized suffixes and recursive includes are rejected.
+
+Julia produces `build/messages/julia/MyMessages/MyMessages.jl` and one file per nested module. C++ produces a single self-contained C++17 header at `build/messages/cpp/MyMessages/MyMessages.hpp`. Each generator returns the absolute path to its root file. Definitions are validated and rendered before output is written. Generated paths are overwritten; unrelated files are left alone.
+
+### Build workflow
 
 Generation normally belongs in a separate build step. The simulation can then use a regular `include` of the generated root file, as in the opening example. Its Julia environment needs EnumX and StaticArrays; GradientMicroIDL is needed only for generation. C++ consumers need the generated include directory and Eigen headers when numeric array fields are present. Generation itself does not compile C++ or obtain Eigen.
 
-The namespace example can be generated with `julia --project=. examples/messages.jl` from the package directory. Its paths are anchored to `@__DIR__`, and its outputs are under `build/messages/julia/MyMessages/` and `build/messages/cpp/MyMessages/`.
+The namespace example can be generated with `julia --project=test examples/messages.jl` from the package directory. Its paths are anchored to `@__DIR__`, and its outputs are under `build/messages/julia/MyMessages/` and `build/messages/cpp/MyMessages/`.
 
 ## Running the tests
 

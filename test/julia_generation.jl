@@ -4,6 +4,7 @@ using Test
 using OrderedCollections: OrderedDict
 using StaticArrays: SVector, SMatrix
 import GradientMicroIDL
+import YAML
 
 const EXAMPLE = joinpath(@__DIR__, "..", "examples", "messages.yaml")
 

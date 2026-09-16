@@ -1,6 +1,6 @@
 # Generate code for this struct with:
 #
-#   julia --project=. -e 'using GradientMicroIDL; generate_julia("examples/control.yaml", "build/control/julia", "Control")'
+#   julia --project=test -e 'using GradientMicroIDL; import YAML; generate_julia("examples/control.yaml", "build/control/julia", "Control")'
 #
 messages:
   MotorParameters:

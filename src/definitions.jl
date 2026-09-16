@@ -1,5 +1,5 @@
-# The parser records what was declared and resolves references before source is printed.
-# This keeps YAML traversal and memory-layout decisions out of the language-specific
+# Resolution validates specification objects and calculates layouts before source is printed.
+# This keeps declaration validation and memory-layout decisions out of the language-specific
 # printer. Only completed enum and message definitions enter the shared type table.
 
 # Lengths are either positive integer literals or names scoped to a message. Layouts may
@@ -107,22 +107,6 @@ function identifier(value, context)
 
 end
 
-# YAML can produce scalars and lists where the IDL expects a dictionary. Check at each
-# structural boundary so later iteration failures do not obscure the malformed entry.
-function mapping(value, context)
-    value isa AbstractDict || invalid(context, "expected a dictionary")
-    return value
-end
-
-# Namespace and enum dictionaries have fixed section names. Rejecting other keys catches
-# misspellings that would otherwise silently omit part of the requested interface.
-function check_keys(definitions, allowed, context)
-    for key in keys(definitions)
-        key isa AbstractString && key in allowed ||
-            invalid(context, "unknown entry $(repr(key))")
-    end
-end
-
 # Dimensions and layout calculations use BigInt until checked here. This prevents integer
 # overflow from turning a large requested array into an apparently valid smaller layout.
 function checked_size(value, context)
@@ -131,75 +115,35 @@ function checked_size(value, context)
 end
 
 # Keep the dependency on Julia's native alignment query in one place. The rest of the
-# parser handles primitives, enums, and messages through the same layout record.
+# resolver handles primitives, enums, and messages through the same layout record.
 function primitive_type(name)
     type = PRIMITIVES[name]
     return TypeDefinition(name, :primitive, sizeof(type), Base.datatype_alignment(type))
 end
 
-# File loading is separate from namespace parsing so includes and dictionary inputs share
-# the same validation. path is the namespace path; stack contains only active file includes.
-function parse_file(filename, path, types, stack)
-
-    # Canonical paths also catch recursive includes spelled with .. or symbolic links.
-    # A stack, rather than a permanent visited set, allows reuse under separate namespaces.
-    context = join(path, ".")
-    isfile(filename) || invalid(context, "YAML file not found: $filename")
-    filename = realpath(filename)
-    filename in stack && invalid(
-        context,
-        "recursive include: $(join([stack; filename], " -> "))",
-    )
-    push!(stack, filename)
-
-    # YAML's default duplicate-key behavior only logs an error and overwrites the value.
-    # Its mapping constructor lets us reject duplicates while preserving source order.
-    constructors = Dict(
-        "tag:yaml.org,2002:map" => (constructor, node) -> YAML.construct_mapping(
-            OrderedDict{Any, Any},
-            constructor,
-            node;
-            strict_unique_keys = true,
-        ),
-    )
-
-    # Attach the filename to parser errors, and remove this include from the active stack
-    # even when a child fails. Interrupts should still stop generation immediately.
-    try
-        definitions = YAML.load_file(filename, constructors)
-        return parse_namespace(definitions, path, dirname(filename), types, stack)
-    catch error
-        error isa InterruptException && rethrow()
-        invalid(filename, sprint(showerror, error))
-    finally
-        pop!(stack)
-    end
-
-end
-
 # Resolve an enum to its integer representation without creating a Julia module. This
 # makes its layout available to later messages and catches bad values before file writing.
-function parse_enum(name, definitions, context)
+function resolve_enum(specification::EnumSpec, context)
 
     # The base type must be an explicit integer type; floats and byte-valued char are not
     # enum base types in the IDL. Each enum must also supply at least one named value.
-    definitions = mapping(definitions, context)
-    check_keys(definitions, ("type", "values"), context)
-    base = get(definitions, "type", nothing)
-    valid = base isa AbstractString && base != "char" && haskey(PRIMITIVES, base)
+    name = specification.name
+    base = specification.type
+    valid = base != "char" && haskey(PRIMITIVES, base)
     valid && PRIMITIVES[base] <: Integer ||
         invalid(context, "expected an integer enum type")
-    entries = mapping(get(definitions, "values", nothing), context)
+    entries = specification.values
     isempty(entries) && invalid(context, "empty enums are not supported")
 
     # Check values before converting them so signedness or width cannot silently change
     # their meaning. EnumX reserves T, and the enum module also owns its own name.
     values = Pair{String, BigInt}[]
+    names = Set{String}()
     for (key, value) in entries
 
-        key = identifier(key, context)
+        key = unique_name!(names, key, context)
         key in ("T", name) && invalid(context, "enum value name $key is reserved")
-        valid = value isa Integer && !(value isa Bool)
+        valid = !(value isa Bool)
         valid && typemin(PRIMITIVES[base]) <= value <= typemax(PRIMITIVES[base]) ||
             invalid(context, "value for $key must be an integer in the range of $base")
         push!(values, key => BigInt(value))
@@ -253,28 +197,19 @@ function substitute_size(value, arguments)
 
 end
 
-# Descriptions are data, not source code. Printers escape them for their own language.
-function description(definitions, context)
-
-    value = get(definitions, "description", "")
-    value isa AbstractString || invalid(context, "description must be a string")
-    return String(value)
-
-end
-
-# Parameters currently represent lengths only. An explicit int64 declaration keeps the
-# C++ template signature predictable; every use must also fit the host's positive Int.
-function parse_parameters(definitions, path)
+# Native specifications retain parameter declarations, including unsupported types, so
+# every entry path gets the same semantic checks during resolution.
+function resolve_parameters(specification::MessageSpec, path)
 
     context = join(path, ".")
-    entries = mapping(get(definitions, "parameters", OrderedDict()), context)
     parameters = String[]
-    for (name, type) in entries
+    names = Set{String}()
+    for parameter in specification.parameters
 
-        name = identifier(name, context)
+        name = unique_name!(names, parameter.name, context)
         (name in path || haskey(PRIMITIVES, name)) &&
             invalid(context, "parameter name $name conflicts with a type or namespace")
-        type == "int64" || invalid(context, "length parameters must declare int64")
+        parameter.type == "int64" || invalid(context, "length parameters must declare int64")
         push!(parameters, name)
 
     end
@@ -293,21 +228,14 @@ function parse_length(text, parameters, context)
 
 end
 
-# Fields accept a type string or a dictionary with a type and optional documentation.
+# Field specifications retain a type expression and optional documentation.
 # Resolve the element separately from its surrounding array shape, retaining arguments
 # so both printers can reproduce concrete and parameter-forwarding message references.
-function parse_field(name, specification, path, types, parameters)
+function resolve_field(field::FieldSpec, path, types, parameters)
 
+    name = field.name
     context = join([path; name], ".")
-    documentation = ""
-    if specification isa AbstractDict
-
-        check_keys(specification, ("type", "description"), context)
-        documentation = description(specification, context)
-        specification = get(specification, "type", nothing)
-
-    end
-    specification isa AbstractString || invalid(context, "expected a type string")
+    specification = field.type
     parsed = match(
         r"^([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*)(?:\{([^{}]*)\})?(?:\[([^\]]*)\])?$",
         strip(specification),
@@ -374,28 +302,26 @@ function parse_field(name, specification, path, types, parameters)
 
     end
     size = layout_expression(:*, type.size, dimensions...)
-    return FieldDefinition(name, type, dimensions, size, documentation)
+    return FieldDefinition(name, type, dimensions, size, field.description)
 
 end
 
-# Resolve fields in YAML order and sort only by alignment. Positive length parameters do
+# Resolve fields in declaration order and sort only by alignment. Positive length parameters do
 # not change alignment, so Julia and C++ can share one field order for all instantiations.
-function parse_message(name, definitions, path, types)
+function resolve_message(specification::MessageSpec, path, types)
 
+    name = specification.name
     context = join(path, ".")
-    definitions = mapping(definitions, context)
-    check_keys(definitions, ("description", "parameters", "fields"), context)
-    documentation = description(definitions, context)
-    parameters = parse_parameters(definitions, path)
-    entries = mapping(get(definitions, "fields", nothing), "$context.fields")
-    isempty(entries) && invalid(context, "empty messages are not supported")
+    parameters = resolve_parameters(specification, path)
+    isempty(specification.fields) && invalid(context, "empty messages are not supported")
     fields = FieldDefinition[]
-    for (key, specification) in entries
+    names = Set{String}()
+    for field in specification.fields
 
-        key = identifier(key, context)
+        key = unique_name!(names, field.name, context)
         key == name && invalid(context, "field name $key conflicts with its constructor")
         key in parameters && invalid(context, "field name $key conflicts with a parameter")
-        push!(fields, parse_field(key, specification, path, types, parameters))
+        push!(fields, resolve_field(field, path, types, parameters))
 
     end
     order = sortperm(
@@ -410,20 +336,26 @@ function parse_message(name, definitions, path, types)
     size = layout_expression(:+, (field.size for field in fields)...)
     size = layout_expression(:round, size, alignment)
     type = TypeDefinition(context, :message, size, alignment)
-    return MessageDefinition(type, fields, order, parameters, documentation)
+    return MessageDefinition(type, fields, order, parameters, specification.description)
 
 end
 
-# Walk one namespace in the language's definition order. types is shared across the tree
-# and contains completed declarations only, which enforces the prior-definition rule
-# without a separate dependency-sorting pass. names checks collisions within this module.
-function parse_namespace(definitions, path, base_dir, types, stack)
+# Native vectors can contain duplicates even though dictionaries cannot. Validate them
+# at the shared resolution boundary so direct construction gets the same safeguards.
+function unique_name!(names, value, context)
 
-    # Missing sections behave like empty dictionaries. The output still retains empty
-    # namespaces because they are valid modules and may be part of the public interface.
+    name = identifier(value, context)
+    name in names && invalid(context, "duplicate declaration $name")
+    push!(names, name)
+    return name
+
+end
+
+# Resolve one expanded namespace in declaration order. Only completed definitions enter
+# the shared type table, enforcing prior references without a dependency-sorting framework.
+function resolve_namespace(specification::NamespaceSpec, path, types)
+
     context = join(path, ".")
-    definitions = mapping(definitions, context)
-    check_keys(definitions, ("enums", "messages", "namespaces"), context)
     namespace = NamespaceDefinition(
         last(path),
         EnumDefinition[],
@@ -431,51 +363,62 @@ function parse_namespace(definitions, path, base_dir, types, stack)
         NamespaceDefinition[],
     )
     names = Set{String}()
+    try
 
-    # Complete each declaration before making its type available to later declarations.
-    for section in ("enums", "messages", "namespaces")
+        # All declarations share the namespace's binding table. Each group retains its
+        # own order, with enums before messages and child namespaces last.
+        groups = (
+            [item.name => item for item in specification.enums],
+            [item.name => item for item in specification.messages],
+            specification.namespaces,
+        )
+        for entries in groups, (key, entry) in entries
 
-        entries = mapping(get(definitions, section, OrderedDict()), "$context.$section")
-        for (name, entry) in entries
-
-            # Enums, messages, and child modules all occupy the same Julia namespace.
-            # Check collisions across sections as well as with required module bindings.
-            name = identifier(name, context)
+            name = unique_name!(names, key, context)
             name in (first(path), last(path)) &&
                 invalid(context, "name $name conflicts with an enclosing module binding")
             haskey(PRIMITIVES, name) && invalid(context, "name $name is a primitive type")
-            name in names && invalid(context, "duplicate declaration $name")
-            push!(names, name)
             child_path = [path; name]
             qualified = join(child_path, ".")
+            if entry isa EnumSpec
 
-            if section == "enums"
-
-                definition = parse_enum(name, entry, qualified)
+                definition = resolve_enum(entry, qualified)
                 push!(namespace.enums, definition)
                 types[qualified] = definition.type
 
-            elseif section == "messages"
+            elseif entry isa MessageSpec
 
-                definition = parse_message(name, entry, child_path, types)
+                definition = resolve_message(entry, child_path, types)
                 push!(namespace.messages, definition)
                 types[qualified] = definition
 
             else
 
-                # Only file includes change the directory used for further includes.
-                # Inline child namespaces inherit the directory of the containing file.
-                child = entry isa AbstractString ?
-                    parse_file(joinpath(base_dir, entry), child_path, types, stack) :
-                    parse_namespace(entry, child_path, base_dir, types, stack)
+                child = resolve_namespace(entry, child_path, types)
                 push!(namespace.namespaces, child)
 
             end
 
         end
+        return namespace
+
+    catch error
+
+        error isa InterruptException && rethrow()
+        isnothing(specification.source) && rethrow()
+        invalid(specification.source, sprint(showerror, error))
 
     end
 
-    return namespace
+end
+
+# Both emitters enter through this boundary. Loading/conversion produces declarations;
+# this pass validates every declaration and computes private layout records afresh.
+function resolve(specification::NamespaceSpec, name, base_dir)
+
+    name = identifier(name, "root namespace")
+    expanded = expand_includes(specification, abspath(base_dir), String[])
+    types = Dict{String, Union{TypeDefinition, MessageDefinition}}()
+    return resolve_namespace(expanded, [name], types)
 
 end

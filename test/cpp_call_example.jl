@@ -4,6 +4,7 @@ using Test
 using Libdl
 using StaticArrays: SVector, SMatrix
 import GradientMicroIDL
+import YAML
 
 include("cpp_test_setup.jl")
 using .CppTestSetup: cpp_compiler, eigen_include_dir

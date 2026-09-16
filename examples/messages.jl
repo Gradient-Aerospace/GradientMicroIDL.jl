@@ -6,6 +6,7 @@
 #
 
 import GradientMicroIDL
+import YAML
 
 # Generate the Julia module beside the package's other build outputs.
 root_file = GradientMicroIDL.generate_julia(

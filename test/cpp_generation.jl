@@ -3,6 +3,7 @@ module CppGenerationTests
 using Test
 using OrderedCollections: OrderedDict
 import GradientMicroIDL
+import YAML
 
 const EXAMPLE = joinpath(@__DIR__, "..", "examples", "messages.yaml")
 
