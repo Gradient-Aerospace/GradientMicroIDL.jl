@@ -1,6 +1,6 @@
 # GradientMicroIDL
 
-This Julia package generates immutable Julia types and corresponding C++ structs for simple messages. Both generators use the same field ordering and layout calculations, with the goal of sharing messages through `ccall` without translating their contents. C++ output is currently tested as generated source; compiling it and verifying interoperability with Julia are follow-up work.
+This Julia package generates immutable Julia types and corresponding C++ structs for simple messages. Both generators use the same field ordering and layout calculations, with the goal of sharing messages through `ccall` without translating their contents. Tests compile the generated C++ and check its layout and pointer-based interoperability with the generated Julia types on Linux and macOS.
 
 ## Specifications
 
@@ -135,7 +135,7 @@ A view borrows the message's storage and must not outlive it. Accessors reject t
 
 The header emits `static_assert` checks for each message's size, alignment, field offsets, standard layout, and trivial copyability. The expected sizes and offsets come from the Julia host used for generation. These assertions will run when a consumer compiles the header; a target with a different native layout may reject it. The intended interface assumes little-endian storage and matching floating-point representations. There is no byte swapping or serialization.
 
-Current tests inspect emitted C++ source without building it or requiring Eigen to be installed. They do not yet establish binary interoperability, pointer-based calls, or by-value calls between Julia and C++. Compiled verification and its local/CI build setup remain separate follow-up work.
+Tests check both emitted source and compiled behavior. A small shared library reports C++ sizes, alignments, and field offsets for comparison with the actual loaded Julia types. Additional tests exercise constructors, fixed-array copies, Eigen views, and read/write calls through Julia `Ref` arguments. These checks cover the tested host and compiler combinations; by-value calls and other target ABIs remain outside the tested contract.
 
 ## Generating Code
 
@@ -239,6 +239,43 @@ double variance = covariance_view(0, 0);
 ```
 
 The scalar timestamp struct is emitted with `microseconds` before `weeks` in storage, while its value constructor still accepts `weeks` first. The generated header also contains the static layout checks and the const/mutable Eigen accessor definitions.
+
+## Running the tests
+
+The full test suite uses Julia 1.12 or later and a native C++17 compiler. The compiled test harness currently supports Linux and macOS; CI runs GCC on Linux and Apple Clang on macOS. The compiler and Julia must target the same architecture.
+
+On macOS, a compiler is provided by Xcode Command Line Tools (`xcode-select --install`). On Debian/Ubuntu, `sudo apt-get install g++` provides the compiler and development files. Other Linux distributions can supply GCC or Clang through their package manager. No CMake or C++ test framework is needed.
+
+From the package directory:
+
+```sh
+julia --project=test -e 'using Pkg; Pkg.instantiate()'
+julia --project=test test/runtests.jl
+```
+
+If an existing local manifest predates changes to the test dependencies, `julia --project=test -e 'using Pkg; Pkg.resolve(); Pkg.instantiate()'` refreshes it. Fresh checkouts do not need this extra step.
+
+The harness uses `c++` by default. `CXX` can specify another executable name or an absolute path, without additional flags:
+
+```sh
+CXX=clang++ julia --project=test test/runtests.jl
+```
+
+A missing compiler fails the test run with setup instructions; compiled tests are not silently skipped. Compiler errors from the shared-library build are shown normally. Three additional syntax-only compiles are expected to fail: writing through a const view, obtaining a view from a temporary message, and obtaining a view from a const temporary message. A successful control compile runs first so missing headers cannot masquerade as the expected failures.
+
+### Eigen for testing
+
+The test harness obtains Eigen 5.0.0 through `test/Artifacts.toml`, which pins the official release archive by its download checksum and unpacked tree hash. Julia downloads and verifies it on the first compiled test run, then reuses the copy in its artifact cache. Local tests and CI use the same declaration. No Eigen compilation or system installation is needed: the test compiler is simply given the artifact's include directory.
+
+The first run needs network access to obtain the artifact; subsequent runs can use the cached files offline. Code generation itself does not request the artifact or require a compiler. A manually unpacked Eigen directory under `test/` is not used. Updating Eigen means updating the versioned URL and both hashes in `test/Artifacts.toml`, together with the release-directory name in `eigen_include_dir` in `test/cpp_interop.jl`.
+
+### What the compiled tests do
+
+The harness generates both languages in a temporary directory, builds one shared library, and calls it from Julia. Layout probes use the C++ compiler's `sizeof`, `alignof`, and `offsetof`; their expected values come from Julia's loaded types rather than the generator's layout records. The real example is supplemented with all scalar widths, both 64-bit enum extremes, rectangular matrices, row/column shapes, and arrays of padded messages.
+
+The library reads Julia-constructed values, fills fresh Julia-owned storage with C++-constructed values, and modifies fields through Eigen views and ordinary C++ member access. Tests compare field values rather than padding bytes. C++ checks return a failing source line number instead of aborting the Julia process. The shared library is unloaded before the temporary directory is removed.
+
+The CI workflow in `.github/workflows/test.yml` instantiates the same test workspace and runs the same command. Its Julia depot cache also retains downloaded artifacts between runs.
 
 ## Outstanding Questions
 

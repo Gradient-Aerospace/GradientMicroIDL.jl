@@ -1,0 +1,40 @@
+# Supplement the real example with all scalar widths, padded message arrays, and
+# rectangular/row/column matrices. The Julia harness replaces Unsigned.maximum with
+# typemax(UInt64), exercising dictionary input beyond YAML's signed integer range.
+enums:
+  Signed:
+    type: int64
+    values:
+      minimum: -9223372036854775808
+      maximum: 9223372036854775807
+  Unsigned:
+    type: uint64
+    values:
+      maximum: 0
+messages:
+  Scalars:
+    i8: int8
+    i16: int16
+    i32: int32
+    i64: int64
+    u8: uint8
+    u16: uint16
+    u32: uint32
+    u64: uint64
+    f32: float32
+    f64: float64
+    byte: char
+    signed_value: Signed
+    unsigned_value: Unsigned
+  Child:
+    tag: uint8
+    count: uint64
+  Packet:
+    sequence: uint16
+    samples: float64[2,3]
+    row: float32[1,3]
+    column: int16[3,1]
+    children: Child[2]
+    states: Signed[2]
+    bytes: char[3]
+    scalars: Scalars

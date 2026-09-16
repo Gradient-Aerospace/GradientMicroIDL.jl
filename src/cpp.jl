@@ -183,7 +183,7 @@ end
 
 # These assertions are emitted now and evaluated only when a consumer compiles the header.
 # They compare the C++ compiler's layout against the native layout planned during Julia
-# generation; they do not substitute for the future compiled interoperability tests.
+# generation. The compiled tests also compare C++ layout with actual loaded Julia types.
 function print_cpp_layout(io, message, indent)
 
     name = last(split(message.type.name, '.'))
