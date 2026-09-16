@@ -8,7 +8,7 @@ Let's start with a simple example. We'll define a type, generate Julia and C++ d
 
 ### Message Specification
 
-Here's a first example using a simplified typical GNSS message:
+Here's a first example using a simplified typical GNSS message, stored in [`examples/gnss.yaml`](examples/gnss.yaml):
 
 ```yaml
 # gnss.yaml
@@ -381,7 +381,9 @@ Now that we've seen an end-to-end example, the rest of the readme focuses on mor
 
 ## Definitions
 
-A definition file describes a namespace through three optional sections: `enums`, `messages`, and `namespaces`. Empty namespaces are valid. Messages and enums must contain at least one field or value, respectively.
+A definition file describes a namespace through three optional sections: `enums`, `messages`, and `namespaces`. Each section can be omitted or be an empty dictionary, such as `enums: {}` or `messages: {}`. A namespace with no declarations is also valid.
+
+The nonempty requirement applies to individual declarations: a named message must have at least one entry in its `fields` dictionary, and a named enum must have at least one entry in its `values` dictionary. Empty messages are excluded because an empty Julia struct occupies zero bytes while an ordinary empty C++ struct occupies storage. Empty enums are excluded by the current schema; this is a package restriction, not a requirement that the `enums` section contain declarations. A bare section such as `enums:` is YAML null rather than an empty dictionary; `{}` makes an explicitly empty section unambiguous.
 
 ### Messages and documentation
 
@@ -390,12 +392,12 @@ Each message has a required `fields` dictionary, an optional `description` strin
 ```yaml
 messages:
   MotorParameters:
-    description: Stores the parameters for one motor.
+    description: Stores the parameters for one motor
     fields:
       position: float64[3]
-      thrust_constant:
+      torque_constant:
         type: float64
-        description: Converts the motor command to thrust.
+        description: Converts the motor command to torque
   ControlParameters:
     description: |
       Stores all of the parameters used by the controller.
@@ -403,11 +405,15 @@ messages:
     parameters:
       N: int64
     fields:
-      num_motors: uint32
+      num_motors:
+        type: uint32
+        description: The number of motors used by this controller
       motors:
         type: MotorParameters[N]
-        description: Parameters for each motor, in command order.
+        description: Parameters for each motor, in command order
 ```
+
+This example is stored in [`examples/control.yaml`](examples/control.yaml), together with the concrete and parameterized uses below.
 
 Message descriptions become Julia type docstrings and C++ documentation comments. Field descriptions become Julia field docstrings and C++ member comments. Descriptions are optional and do not affect storage. Unknown keys are rejected to catch misspellings.
 
@@ -432,14 +438,14 @@ messages:
       control: ControlParameters{N}[M]
 ```
 
-These entries belong in the same `messages` dictionary. The first uses a concrete four-motor controller. The second contains `M` controllers, each with capacity for `N` motors. All template arguments must be supplied; bare `ControlParameters` is not a concrete field type.
+In `examples/control.yaml`, these entries follow the earlier definitions in the same `messages` dictionary; the two excerpts do not represent two separate `messages` keys. The first uses a concrete four-motor controller. The second contains `M` controllers, each with capacity for `N` motors. All template arguments must be supplied; bare `ControlParameters` is not a concrete field type.
 
 Julia generation produces parametric types such as `ControlParameters{N}`; C++ generation produces templates such as `ControlParameters<N>`. Julia callers explicitly supply lengths for both positional and keyword constructors:
 
 ```julia
 motor = MotorParameters(;
     position = SA[0.0, 0.0, 0.0],
-    thrust_constant = 1.0,
+    torque_constant = 1.0,
 )
 controls = ControlParameters{2}(;
     num_motors = 2,
@@ -453,7 +459,7 @@ Parameters can determine vector lengths and arguments of nested messages.
 
 Matrix dimensions cannot be parameterized currently and must use literal values; `float64[N,3]` is not supported. A fixed-shape matrix can still contain parameterized messages, for example `ControlParameters{N}[2,3]`.
 
-Zero-length arrays will work in Julia but not in C++, and hence types with zero-length arrays cannot be used on the interface between the two. For an optional collection, capacity can be at least one while a separate active-count field (such as `num_motors` in the example above) is zero. Both languages still store the reserved element; application code ignores it when the count is zero. A count such as `num_motors` is an ordinary field: the application is responsible for maintaining `0 ≤ num_motors ≤ N`.
+Julia itself supports zero-length arrays, but this package rejects zero lengths for both generators and for generated Julia constructors because the C++ storage requires positive lengths. For an optional collection, capacity can be at least one while a separate active-count field (such as `num_motors` in the example above) is zero. Both languages still store the reserved element; application code ignores it when the count is zero. A count such as `num_motors` is an ordinary field: the application is responsible for maintaining `0 ≤ num_motors ≤ N`.
 
 ### Field types and enums
 
@@ -476,7 +482,7 @@ YAML.jl parses integer values as Julia `Int`, which is `Int64` on 64-bit systems
 
 ### Namespaces, includes, and references
 
-Each entry in `namespaces` can contain an inline namespace or a filename to include at that location. Here is an example that ties the opening GNSS definitions into a deeper structure:
+Each entry in `namespaces` can contain an inline namespace or a filename to include at that location. [`examples/messages.yaml`](examples/messages.yaml) ties the opening GNSS definitions into a deeper structure:
 
 ```yaml
 namespaces:
@@ -538,17 +544,17 @@ Both generators accept a YAML filename, an output directory, and the root module
 ```julia
 using GradientMicroIDL
 
-julia_file = generate_julia("messages.yaml", "build/julia", "MyMessages")
-cpp_header = generate_cpp("messages.yaml", "build/cpp", "MyMessages")
+julia_file = generate_julia("examples/messages.yaml", "build/messages/julia", "MyMessages")
+cpp_header = generate_cpp("examples/messages.yaml", "build/messages/cpp", "MyMessages")
 ```
 
-Julia produces `build/julia/MyMessages/MyMessages.jl` and one file per nested module. C++ produces a single self-contained C++17 header at `build/cpp/MyMessages/MyMessages.hpp`. Each function returns the absolute path to its root file. Definitions are validated and rendered before output is written. Generated paths are overwritten; unrelated files are left alone.
+Julia produces `build/messages/julia/MyMessages/MyMessages.jl` and one file per nested module. C++ produces a single self-contained C++17 header at `build/messages/cpp/MyMessages/MyMessages.hpp`. Each function returns the absolute path to its root file. Definitions are validated and rendered before output is written. Generated paths are overwritten; unrelated files are left alone.
 
 Dictionary overloads accept the same schema: `generate_julia(definitions, out_dir, module_name; base_dir = pwd())` and `generate_cpp(definitions, out_dir, namespace_name; base_dir = pwd())`. Dictionary iteration order determines declaration and constructor order; `OrderedDict` makes that order explicit. `base_dir` controls the location of files included by the dictionary.
 
 Generation normally belongs in a separate build step. The simulation can then use a regular `include` of the generated root file, as in the opening example. Its Julia environment needs EnumX and StaticArrays; GradientMicroIDL is needed only for generation. C++ consumers need the generated include directory and Eigen headers when numeric array fields are present. Generation itself does not compile C++ or obtain Eigen.
 
-The namespace example can be generated with `julia --project=. examples/my_messages.jl` from the package directory. Its paths are anchored to `@__DIR__`, and its outputs are under `build/julia/MyMessages/` and `build/cpp/MyMessages/`.
+The namespace example can be generated with `julia --project=. examples/messages.jl` from the package directory. Its paths are anchored to `@__DIR__`, and its outputs are under `build/messages/julia/MyMessages/` and `build/messages/cpp/MyMessages/`.
 
 ## Running the tests
 
@@ -591,7 +597,9 @@ julia --project=test test/cpp_call_example.jl
 
 ### What the compiled tests do
 
-The harness generates both languages in a temporary directory, builds one shared library, and calls it from Julia. Layout probes use the C++ compiler's `sizeof`, `alignof`, and `offsetof`; their expected values come from Julia's loaded types rather than the generator's layout records. The real example is supplemented with all scalar widths, both 64-bit enum extremes, rectangular matrices, row/column shapes, and arrays of padded messages. Parameterized fixtures additionally check nested arrays, multiple lengths, concrete instantiations, parameter forwarding, and documentation.
+The README YAML excerpts are checked against the files in `examples/`. Tests generate and load Julia code and compile C++ headers for each of those example files.
+
+The interoperability harness generates both languages in a temporary directory, builds one shared library, and calls it from Julia. Layout probes use the C++ compiler's `sizeof`, `alignof`, and `offsetof`; their expected values come from Julia's loaded types rather than the generator's layout records. The real example is supplemented with all scalar widths, both 64-bit enum extremes, rectangular matrices, row/column shapes, and arrays of padded messages. Parameterized fixtures additionally check nested arrays, multiple lengths, concrete instantiations, parameter forwarding, and documentation.
 
 The library reads Julia-constructed values, fills fresh Julia-owned storage with C++-constructed values, and modifies fields through Eigen views and ordinary C++ member access. Tests compare field values rather than padding bytes. C++ checks return a failing source line number instead of aborting the Julia process. The shared library is unloaded before the temporary directory is removed.
 

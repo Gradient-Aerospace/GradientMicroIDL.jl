@@ -4,7 +4,7 @@ using Test
 using OrderedCollections: OrderedDict
 import GradientMicroIDL
 
-const EXAMPLE = joinpath(@__DIR__, "..", "examples", "my_messages.yaml")
+const EXAMPLE = joinpath(@__DIR__, "..", "examples", "messages.yaml")
 
 @testset "C++ example generation" begin
 

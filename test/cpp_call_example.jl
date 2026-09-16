@@ -50,7 +50,7 @@ end
     # All generated files and the compiled library belong to this temporary directory.
     compiler = cpp_compiler()
     eigen = eigen_include_dir()
-    example = joinpath(@__DIR__, "..", "examples", "my_messages.yaml")
+    example = joinpath(@__DIR__, "..", "examples", "messages.yaml")
     mktempdir() do directory
 
         julia_file = GradientMicroIDL.generate_julia(example, directory, "MyMessages")

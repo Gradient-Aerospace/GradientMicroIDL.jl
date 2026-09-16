@@ -5,7 +5,7 @@ using OrderedCollections: OrderedDict
 using StaticArrays: SVector, SMatrix
 import GradientMicroIDL
 
-const EXAMPLE = joinpath(@__DIR__, "..", "examples", "my_messages.yaml")
+const EXAMPLE = joinpath(@__DIR__, "..", "examples", "messages.yaml")
 
 # Each generated module gets a fresh parent module so tests can reuse names without
 # replacing earlier definitions. The callback keeps world-age handling in this one helper.

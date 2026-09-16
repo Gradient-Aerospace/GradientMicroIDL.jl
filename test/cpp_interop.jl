@@ -11,7 +11,7 @@ include("cpp_test_setup.jl")
 using .CppTestSetup: cpp_compiler, eigen_include_dir
 
 const CPP_DIR = joinpath(@__DIR__, "cpp")
-const EXAMPLE = joinpath(@__DIR__, "..", "examples", "my_messages.yaml")
+const EXAMPLE = joinpath(@__DIR__, "..", "examples", "messages.yaml")
 
 # Layout probes use C++ sizeof/alignof/offsetof, not constants from the IDL parser. Julia
 # supplies field names from the actual loaded types, so mismatched fields fail compilation
