@@ -267,7 +267,17 @@ A missing compiler fails the test run with setup instructions; compiled tests ar
 
 The test harness obtains Eigen 5.0.0 through `test/Artifacts.toml`, which pins the official release archive by its download checksum and unpacked tree hash. Julia downloads and verifies it on the first compiled test run, then reuses the copy in its artifact cache. Local tests and CI use the same declaration. No Eigen compilation or system installation is needed: the test compiler is simply given the artifact's include directory.
 
-The first run needs network access to obtain the artifact; subsequent runs can use the cached files offline. Code generation itself does not request the artifact or require a compiler. A manually unpacked Eigen directory under `test/` is not used. Updating Eigen means updating the versioned URL and both hashes in `test/Artifacts.toml`, together with the release-directory name in `eigen_include_dir` in `test/cpp_interop.jl`.
+The first run needs network access to obtain the artifact; subsequent runs can use the cached files offline. Code generation itself does not request the artifact or require a compiler. A manually unpacked Eigen directory under `test/` is not used. Updating Eigen means updating the versioned URL and both hashes in `test/Artifacts.toml`, together with the release-directory name in `eigen_include_dir` in `test/cpp_test_setup.jl`.
+
+### A small Julia-to-C++ example
+
+[`test/cpp_call_example.jl`](test/cpp_call_example.jl) is a runnable walkthrough using the supplied message definitions. Its companion [`test/cpp/mutate_measurement.cpp`](test/cpp/mutate_measurement.cpp) defines a function inside an `extern "C"` block that adds `(10, 20, 30)` to a GNSS position through an Eigen view. Julia passes a `Ref{GNSSMeasurement}` with `ccall` and reads the updated message from the `Ref`. Comments explain the build, function lookup, pointer argument, and storage lifetime.
+
+The example runs with the full suite, or on its own from the package directory:
+
+```sh
+julia --project=test test/cpp_call_example.jl
+```
 
 ### What the compiled tests do
 

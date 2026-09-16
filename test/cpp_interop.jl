@@ -3,44 +3,15 @@ module CppInteropTests
 using Test
 using Libdl
 using OrderedCollections: OrderedDict
-using Pkg.Artifacts: artifact_hash, artifact_path, ensure_artifact_installed
 using StaticArrays: SVector, SMatrix
 import GradientMicroIDL
 import YAML
 
+include("cpp_test_setup.jl")
+using .CppTestSetup: cpp_compiler, eigen_include_dir
+
 const CPP_DIR = joinpath(@__DIR__, "cpp")
 const EXAMPLE = joinpath(@__DIR__, "..", "examples", "my_messages.yaml")
-
-# The build helper deliberately supports the two toolchains exercised in CI. A missing
-# compiler is a setup failure, not a reason to report successful but incomplete tests.
-# CXX is one executable name or path; Julia's command interpolation handles spaces safely.
-function cpp_compiler()
-
-    Sys.islinux() || Sys.isapple() ||
-        error("Compiled C++ tests currently support Linux and macOS.")
-    compiler = get(ENV, "CXX", "c++")
-    executable = Sys.which(compiler)
-    isnothing(executable) && error(
-        "C++17 compiler '$compiler' was not found. Install Xcode Command Line Tools " *
-        "on macOS or g++/clang++ on Linux, or set CXX to the compiler executable.",
-    )
-    return executable
-
-end
-
-# Only this test asks Pkg to obtain Eigen. The pinned archive and hashes work identically
-# locally and in CI, and the depot cache avoids repeated downloads after the first run.
-function eigen_include_dir()
-
-    artifacts = joinpath(@__DIR__, "Artifacts.toml")
-    ensure_artifact_installed("eigen", artifacts)
-    root = artifact_path(artifact_hash("eigen", artifacts))
-    include_dir = joinpath(root, "eigen-5.0.0")
-    isfile(joinpath(include_dir, "Eigen", "Core")) ||
-        error("The pinned Eigen artifact is missing Eigen/Core: $include_dir")
-    return include_dir
-
-end
 
 # Layout probes use C++ sizeof/alignof/offsetof, not constants from the IDL parser. Julia
 # supplies field names from the actual loaded types, so mismatched fields fail compilation
