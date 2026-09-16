@@ -240,6 +240,71 @@ double variance = covariance_view(0, 0);
 
 The scalar timestamp struct is emitted with `microseconds` before `weeks` in storage, while its value constructor still accepts `weeks` first. The generated header also contains the static layout checks and the const/mutable Eigen accessor definitions.
 
+## Calling C++ from Julia
+
+In a simulation project, code generation and C++ compilation can happen in a separate build step. The simulation then includes the generated Julia module and calls the compiled library. This example assumes the generated files are under `build/julia/` and `build/cpp/`, as above, and the C++ below has been compiled into `build/libtimestamp.dylib` on macOS or `build/libtimestamp.so` on Linux. The paths in the Julia example are relative to the simulation script.
+
+The C++ function reads an input timestamp and writes an output timestamp. For simplicity, the example adds a small increment that stays within the same week:
+
+```cpp
+#include "MyMessages/MyMessages.hpp"
+
+using MyMessages::Sensors::GNSS::GNSSTimeStamp;
+
+extern "C" {
+
+void advance_timestamp(
+    const GNSSTimeStamp* input,
+    std::uint64_t microseconds,
+    GNSSTimeStamp* output
+) {
+    *output = *input;
+    output->microseconds += microseconds;
+}
+
+} // extern "C"
+```
+
+Julia uses `Ref` to provide storage for the messages. An initialized `Ref` supplies an input; an uninitialized `Ref{GNSSTimeStamp}()` supplies space for an output that C++ fills completely before Julia reads it:
+
+```julia
+using Libdl: dlext
+
+include(joinpath(@__DIR__, "build", "julia", "MyMessages", "MyMessages.jl"))
+using .MyMessages.Sensors.GNSS: GNSSTimeStamp
+
+const libtimestamp = joinpath(@__DIR__, "build", "libtimestamp.$dlext")
+
+input = Ref(GNSSTimeStamp(; weeks = 2, microseconds = 30))
+output = Ref{GNSSTimeStamp}()
+ccall(
+    (:advance_timestamp, libtimestamp),
+    Cvoid,
+    (Ref{GNSSTimeStamp}, UInt64, Ref{GNSSTimeStamp}),
+    input,
+    10,
+    output,
+)
+@assert input[].microseconds == 30
+@assert output[] === GNSSTimeStamp(; weeks = 2, microseconds = 40)
+```
+
+This particular C++ function also permits its input and output to point to the same message. Passing the same `Ref` in both positions updates that storage in place:
+
+```julia
+ccall(
+    (:advance_timestamp, libtimestamp),
+    Cvoid,
+    (Ref{GNSSTimeStamp}, UInt64, Ref{GNSSTimeStamp}),
+    output,
+    10,
+    output,
+)
+@assert output[] === GNSSTimeStamp(; weeks = 2, microseconds = 50)
+```
+
+`Cvoid` corresponds to the C++ `void` return type, and each `Ref{GNSSTimeStamp}` argument corresponds to a pointer to the generated struct. Passing the `Ref` directly keeps its storage alive during the call; the C++ function borrows that storage and does not retain the pointer. Although the Julia struct is immutable, C++ can write the message stored in the `Ref`, and Julia reads the result with `output[]`. The structs themselves are not passed or returned by value.
+
 ## Running the tests
 
 The full test suite uses Julia 1.12 or later and a native C++17 compiler. The compiled test harness currently supports Linux and macOS; CI runs GCC on Linux and Apple Clang on macOS. The compiler and Julia must target the same architecture.
