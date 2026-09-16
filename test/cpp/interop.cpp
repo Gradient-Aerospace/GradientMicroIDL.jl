@@ -1,5 +1,5 @@
-// These functions are deliberately small C interfaces: Julia supplies or receives message
-// storage through pointers. No C++ exceptions or by-value messages cross the boundary.
+// These small C-linkage interfaces exercise both explicit message pointers and by-value
+// returns. No C++ exceptions cross the boundary.
 #include "Interop/Interop.hpp"
 #include "MyMessages/MyMessages.hpp"
 
@@ -99,6 +99,32 @@ extern "C" int check_packet(const Packet* packet) {
 extern "C" void write_packet(Packet* output) {
     *output = make_packet();
 }
+
+// Return differently shaped generated structs to exercise the target's return convention:
+// a small integer aggregate, a floating-point aggregate, and a large nested message.
+// Julia declares the struct itself as the ccall return type in all three cases.
+// Clang warns because these types have C++ constructors and cannot be declared in C.
+// This fixture deliberately tests their return ABI; silence only that specific warning.
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreturn-type-c-linkage"
+#endif
+
+extern "C" MyMessages::Sensors::GNSS::GNSSTimeStamp return_timestamp() {
+    return MyMessages::Sensors::GNSS::GNSSTimeStamp{7, 123456};
+}
+
+extern "C" MyMessages::Sensors::GNSS::LatitudeLongitudeAltitudeWGS84 return_coordinates() {
+    return MyMessages::Sensors::GNSS::LatitudeLongitudeAltitudeWGS84{0.25, -0.5, 1200.0};
+}
+
+extern "C" Packet return_packet() {
+    return make_packet();
+}
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 
 // Changing coefficients through a writable map must change the original array. Mix those
 // writes with ordinary nested-member writes to exercise the complete shared layout.

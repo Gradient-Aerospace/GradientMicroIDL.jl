@@ -73,6 +73,25 @@ function test_view_access(command)
 
 end
 
+# ccall requires a concrete return type at definition time, unlike Ref{T} arguments.
+# The fixture types are generated at runtime, so specialize this tiny call helper after
+# loading them. User code can simply name its normally included message type in ccall.
+@generated function return_message(function_pointer, ::Type{Message}) where Message
+    return :(ccall(function_pointer, $Message, ()))
+end
+
+# Julia handles registers or a hidden return pointer according to the native C ABI;
+# callers do not supply a Ref here. Compare fields rather than unspecified padding bytes.
+function test_returned_message(library, symbol, expected::Message) where Message
+
+    function_pointer = dlsym(library, symbol)
+    actual = return_message(function_pointer, Message)
+    for name in fieldnames(Message)
+        @test getfield(actual, name) === getfield(expected, name)
+    end
+
+end
+
 # Parameterizing Packet lets ccall use a concrete Ref type in its signature. The caller
 # enters the latest world after loading generated modules, so their new constructors and
 # enum bindings are available throughout these tests.
@@ -122,6 +141,12 @@ function test_roundtrip(root, ::Type{Packet}, library) where Packet
     ccall(write_packet, Cvoid, (Ref{Packet},), output)
     for name in fieldnames(Packet)
         @test getfield(output[], name) === getfield(expected, name)
+    end
+
+    # The same large fixture also crosses the boundary as a by-value return, including
+    # nested messages, enums, and StaticArrays. This checks more than a scalar-only struct.
+    @testset "Large message returned by value" begin
+        test_returned_message(library, :return_packet, expected)
     end
 
     # Mutations through Eigen views must be visible in the original Julia Ref. Also check
@@ -212,6 +237,19 @@ function test_compiled(root, example, directory, compiler, eigen)
 
         @testset "C++ constructors and shared messages" begin
             test_roundtrip(root, root.Packet, library)
+        end
+
+        # Small integer and homogeneous floating-point structs can use different return
+        # conventions from the large Packet, depending on the CI platform's architecture.
+        @testset "Small messages returned by value" begin
+
+            test_returned_message(library, :return_timestamp, gnss.GNSSTimeStamp(7, 123456))
+            test_returned_message(
+                library,
+                :return_coordinates,
+                gnss.LatitudeLongitudeAltitudeWGS84(0.25, -0.5, 1200.0),
+            )
+
         end
 
     finally
