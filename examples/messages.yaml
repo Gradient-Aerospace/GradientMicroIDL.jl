@@ -1,0 +1,24 @@
+namespaces:
+  Common:
+    messages:
+      LocalTimeStamp:
+        fields:
+          microseconds: uint64
+  Sensors:
+    namespaces:
+      Barometer:
+        messages:
+          BarometerMeasurement:
+            fields:
+              timestamp: Common.LocalTimeStamp
+              pressure: float32
+              temperature: float32
+      GNSS: gnss.yaml # A file containing the above structure
+  GNC:
+    namespaces:
+      Navigation:
+        messages:
+          NavInputs:
+            fields:
+              barometer_measurement: Sensors.Barometer.BarometerMeasurement
+              gnss_measurement: Sensors.GNSS.GNSSPositionMeasurement

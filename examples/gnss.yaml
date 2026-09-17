@@ -1,0 +1,23 @@
+enums:
+  GNSSFixType:
+    type: uint8
+    values:
+      none: 0
+      fix_2d: 2
+      fix_3d: 3
+messages:
+  GNSSTimestamp:
+    fields:
+      weeks: uint32
+      milliseconds: uint32
+  GNSSPositionMeasurement:
+    fields:
+      timestamp: GNSSTimestamp
+      fix_type: GNSSFixType
+      position_ecef: float64[3]
+      position_covariance_ecef: float64[3,3]
+  LatitudeLongitudeAltitudeWGS84:
+    fields:
+      latitude: float64
+      longitude: float64
+      altitude: float64
