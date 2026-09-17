@@ -110,8 +110,8 @@ extern "C" void write_packet(Packet* output) {
 #pragma clang diagnostic ignored "-Wreturn-type-c-linkage"
 #endif
 
-extern "C" MyMessages::Sensors::GNSS::GNSSTimeStamp return_timestamp() {
-    return MyMessages::Sensors::GNSS::GNSSTimeStamp{7, 123456};
+extern "C" MyMessages::Sensors::GNSS::GNSSTimestamp return_timestamp() {
+    return MyMessages::Sensors::GNSS::GNSSTimestamp{7, 123456};
 }
 
 extern "C" MyMessages::Sensors::GNSS::LatitudeLongitudeAltitudeWGS84 return_coordinates() {
@@ -155,7 +155,7 @@ extern "C" int check_constructors() {
     }
 
     using namespace MyMessages::Sensors::GNSS;
-    const GNSSTimeStamp timestamp{2, 30};
+    const GNSSTimestamp timestamp{2, 30};
     double position[3] = {1, 2, 3};
     const double covariance[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
     GNSSPositionMeasurement measurement{

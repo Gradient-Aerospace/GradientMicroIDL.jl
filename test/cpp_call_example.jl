@@ -20,7 +20,7 @@ function test_translation(
     # Construct an ordinary generated Julia value using the included GNSS example.
     covariance = SMatrix{3, 3}(1.0:9.0)
     measurement = GNSSPositionMeasurement(;
-        timestamp                = gnss.GNSSTimeStamp(2, 30),
+        timestamp                = gnss.GNSSTimestamp(2, 30),
         fix_type                 = gnss.GNSSFixType.fix_3d,
         position_ecef            = SVector(1.0, 2.0, 3.0),
         position_covariance_ecef = covariance,

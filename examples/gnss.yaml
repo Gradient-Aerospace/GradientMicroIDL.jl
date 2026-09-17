@@ -6,13 +6,13 @@ enums:
       fix_2d: 2
       fix_3d: 3
 messages:
-  GNSSTimeStamp:
+  GNSSTimestamp:
     fields:
       weeks: uint32
       milliseconds: uint32
   GNSSPositionMeasurement:
     fields:
-      timestamp: GNSSTimeStamp
+      timestamp: GNSSTimestamp
       fix_type: GNSSFixType
       position_ecef: float64[3]
       position_covariance_ecef: float64[3,3]

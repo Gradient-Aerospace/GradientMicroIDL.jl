@@ -209,4 +209,59 @@ end
 
 end
 
+# These inputs used to generate successfully but either overwrite a namespace file or
+# fail when Julia loaded the result. Reject them before creating or changing output.
+@testset "Output paths and special names" begin
+
+    mktempdir() do directory
+
+        children = NamespaceSpec(;
+            namespaces = ["Sensors" => NamespaceSpec(), "sensors" => NamespaceSpec()],
+        )
+        nested = NamespaceSpec(; namespaces = ["Equipment" => children])
+        output = joinpath(directory, "output")
+        for specification in (children, nested)
+            @test_throws r"output path collides" generate_julia(specification, output, "Root")
+            @test !ispath(output)
+        end
+
+        # A failed regeneration must also preserve an existing valid output tree.
+        root_file = generate_julia(NamespaceSpec(), output, "Root")
+        previous = read(root_file, String)
+        @test_throws r"output path collides" generate_julia(children, output, "Root")
+        @test read(root_file, String) == previous
+        @test readdir(dirname(root_file)) == ["Root.jl"]
+
+        # EnumX reserves T for the enum's underlying type. The other names are lexical
+        # identifiers that Julia disallows as constructor arguments during lowering.
+        invalid_specs = [NamespaceSpec(; enums = [EnumSpec("T", "uint8", ["ready" => 0])])]
+        for name in ("ccall", "cglobal")
+            push!(invalid_specs, NamespaceSpec(;
+                messages = [MessageSpec("Packet"; fields = [FieldSpec(name, "uint8")])],
+            ))
+        end
+        for generate in (generate_julia, generate_cpp), specification in invalid_specs
+
+            destination = joinpath(directory, "invalid")
+            @test_throws ArgumentError generate(specification, destination, "Root")
+            @test !ispath(destination)
+
+        end
+
+        # Case folding applies to full paths, not globally to namespace names. Distinct
+        # parents can both contain Sensors, and their generated modules must load normally.
+        valid = NamespaceSpec(; namespaces = [
+            "Left" => NamespaceSpec(; namespaces = ["Sensors" => NamespaceSpec()]),
+            "Right" => NamespaceSpec(; namespaces = ["sensors" => NamespaceSpec()]),
+        ])
+        loaded = Base.include(Module(), generate_julia(valid, output, "Valid"))
+        Base.invokelatest() do
+            @test loaded.Left.Sensors isa Module
+            @test loaded.Right.sensors isa Module
+        end
+
+    end
+
+end
+
 end # module SpecificationTests

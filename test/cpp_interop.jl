@@ -180,7 +180,7 @@ function test_compiled(root, example, directory, compiler, eigen)
         "::MyMessages::Sensors::Barometer::BarometerMeasurement" =>
             example.Sensors.Barometer.BarometerMeasurement,
         "::MyMessages::Sensors::GNSS::GNSSFixType" => gnss.GNSSFixType.T,
-        "::MyMessages::Sensors::GNSS::GNSSTimeStamp" => gnss.GNSSTimeStamp,
+        "::MyMessages::Sensors::GNSS::GNSSTimestamp" => gnss.GNSSTimestamp,
         "::MyMessages::Sensors::GNSS::GNSSPositionMeasurement" =>
             gnss.GNSSPositionMeasurement,
         "::MyMessages::Sensors::GNSS::LatitudeLongitudeAltitudeWGS84" =>
@@ -243,7 +243,7 @@ function test_compiled(root, example, directory, compiler, eigen)
         # conventions from the large Packet, depending on the CI platform's architecture.
         @testset "Small messages returned by value" begin
 
-            test_returned_message(library, :return_timestamp, gnss.GNSSTimeStamp(7, 123456))
+            test_returned_message(library, :return_timestamp, gnss.GNSSTimestamp(7, 123456))
             test_returned_message(
                 library,
                 :return_coordinates,

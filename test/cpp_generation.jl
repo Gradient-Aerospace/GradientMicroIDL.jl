@@ -41,8 +41,8 @@ const EXAMPLE = joinpath(@__DIR__, "..", "examples", "messages.yaml")
         @test occursin("::std::uint32_t milliseconds\n", source)
         @test occursin(": weeks{weeks},", source)
         @test occursin("milliseconds{milliseconds}", source)
-        @test occursin("static_assert(sizeof(GNSSTimeStamp) == 8);", source)
-        @test occursin("static_assert(offsetof(GNSSTimeStamp, weeks) == 0);", source)
+        @test occursin("static_assert(sizeof(GNSSTimestamp) == 8);", source)
+        @test occursin("static_assert(offsetof(GNSSTimestamp, weeks) == 0);", source)
 
         # Arrays remain plain storage; views are methods, not additional data members.
         @test occursin("double position_ecef[3]{};", source)

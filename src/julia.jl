@@ -171,6 +171,24 @@ function render_julia!(files, namespace, path)
 
 end
 
+# Reject ambiguous destinations on every host, even when its filesystem distinguishes
+# case. Identifiers are ASCII, so lowercase is sufficient; no Unicode folding is needed.
+# Checking the complete rendered list keeps errors from leaving a partially written tree.
+function validate_julia_paths(files)
+
+    destinations = Dict{String, String}()
+    for (path, _) in files
+
+        key = lowercase(path)
+        if haskey(destinations, key)
+            invalid(path, "output path collides with $(destinations[key]) when ignoring case")
+        end
+        destinations[key] = path
+
+    end
+
+end
+
 # This is the only filesystem-writing step. It accepts a fully validated namespace and
 # returns the root filename so callers do not have to reconstruct the directory convention.
 function write_julia(namespace, out_dir)
@@ -179,6 +197,7 @@ function write_julia(namespace, out_dir)
     # partially written tree.
     files = Pair{String, String}[]
     render_julia!(files, namespace, [namespace.name])
+    validate_julia_paths(files)
 
     # Create only the directories needed by this tree and overwrite its generated files.
     # Other files in the destination are left alone.

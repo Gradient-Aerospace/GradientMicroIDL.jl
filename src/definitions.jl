@@ -75,6 +75,7 @@ const PRIMITIVES = Dict(
 )
 
 # Reserve language keywords and bindings used by the generated modules and constructors.
+# ccall and cglobal pass isidentifier but Julia lowering rejects them as argument names.
 const RESERVED_NAMES = Set(split("""
     alignas alignof and and_eq asm atomic_cancel atomic_commit atomic_noexcept auto
     bitand bitor bool break case catch char char8_t char16_t char32_t class compl concept
@@ -86,7 +87,7 @@ const RESERVED_NAMES = Set(split("""
     synchronized template this thread_local throw true try typedef typeid typename union
     unsigned using virtual void volatile wchar_t while xor xor_eq
     baremodule begin end function global import let local macro module outer primitive
-    quote where abstract type in isa
+    quote where abstract type in isa ccall cglobal
     Base Core EnumX StaticArrays include eval
     """))
 
@@ -128,6 +129,7 @@ function resolve_enum(specification::EnumSpec, context)
     # The base type must be an explicit integer type; floats and byte-valued char are not
     # enum base types in the IDL. Each enum must also supply at least one named value.
     name = specification.name
+    name == "T" && invalid(context, "enum name T is reserved for EnumX's internal type")
     base = specification.type
     valid = base != "char" && haskey(PRIMITIVES, base)
     valid && PRIMITIVES[base] <: Integer ||

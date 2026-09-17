@@ -39,12 +39,12 @@ end
 
             # Equal-alignment fields retain YAML order. Both constructors convert ordinary
             # integers to the declared widths.
-            timestamp = gnss.GNSSTimeStamp(2, 30)
-            keyword_timestamp = gnss.GNSSTimeStamp(; weeks = 2, milliseconds = 30)
+            timestamp = gnss.GNSSTimestamp(2, 30)
+            keyword_timestamp = gnss.GNSSTimestamp(; weeks = 2, milliseconds = 30)
             @test timestamp === keyword_timestamp
             @test timestamp.weeks === UInt32(2)
             @test timestamp.milliseconds === UInt32(30)
-            @test fieldnames(gnss.GNSSTimeStamp) == (:weeks, :milliseconds)
+            @test fieldnames(gnss.GNSSTimestamp) == (:weeks, :milliseconds)
 
             # Build a complete measurement to check that enum, message, vector, and
             # matrix fields can be supplied together through the keyword constructor.
