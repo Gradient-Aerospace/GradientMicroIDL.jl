@@ -1,0 +1,47 @@
+# Nested, independently sized arrays exercise parameter forwarding and tail padding.
+namespaces:
+  Components:
+    messages:
+      Motor:
+        description: |
+          Stores one motor's coefficients.
+          Documentation preserves "$quotes", backslashes \, and comment terminators */.
+        parameters:
+          N: int64
+        fields:
+          tag: uint8
+          scale: float64
+          values:
+            type: float64[N]
+            description: Coefficients in command order.
+      Controller:
+        description: Stores motor parameters for one controller.
+        parameters:
+          N: int64
+          M: int64
+        fields:
+          count: uint32
+          gain: float64
+          motors:
+            type: Motor{N}[M]
+            description: Motors in command order.
+          backup: Motor{2}
+          matrix: Motor{N}[1,2]
+      DocumentedFields:
+        fields:
+          description:
+            type: uint8
+            description: This field name is not message metadata.
+          parameters: uint8
+          fields:
+            type: uint8
+      Vehicle:
+        fields:
+          controllers: Controller{2,3}[2]
+  Nested:
+    messages:
+      Fleet:
+        parameters:
+          K: int64
+        fields:
+          vehicles: Components.Vehicle[K]

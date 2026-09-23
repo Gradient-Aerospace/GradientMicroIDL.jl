@@ -1,0 +1,213 @@
+# This file prints the resolved namespace tree; it does not load YAML or decide layout.
+# The C++ printer consumes the same records, including parameter-independent field order.
+
+# Primitive names need translation to Julia, while enum modules expose their type as T.
+# Qualifying references avoids depending on exports or on which other names are in scope.
+function julia_type(type::TypeDefinition)
+    type.kind == :primitive && return "Base.$(PRIMITIVES[type.name])"
+    suffix = isempty(type.arguments) ? "" : "{" * join(type.arguments, ", ") * "}"
+    return type.kind == :enum ? type.name * ".T" : type.name * suffix
+end
+
+# Apply the array shape only at the field level. The resolved type describes the element,
+# so the same scalar, enum, or message spelling works for both vectors and matrices.
+function julia_type(field::FieldDefinition)
+
+    element = julia_type(field.type)
+    dimensions = field.dimensions
+    isempty(dimensions) && return element
+    length(dimensions) == 1 && return "StaticArrays.SVector{$(dimensions[1]), $element}"
+    rows, columns = dimensions
+    return "StaticArrays.SMatrix{$rows, $columns, $element, $(rows * columns)}"
+
+end
+
+# Emit explicit base types and values rather than relying on EnumX defaults. Integer
+# widths are part of the interface, and declaration order is retained for readability.
+function print_enum(io, definition)
+
+    name = last(split(definition.type.name, '.'))
+    base = julia_type(primitive_type(definition.base))
+    println(io, "EnumX.@enumx $name::$base begin")
+    for (key, value) in definition.values
+        println(io, "    $key = $value")
+    end
+    println(io, "end\n")
+
+end
+
+# Signatures and constructor calls share the same wrapping rule. prefix includes the
+# opening parenthesis; indentation places the closing parenthesis when the call wraps.
+function print_arguments(io, prefix, arguments, indentation; suffix = "")
+
+    # Keep small constructors compact and wrap the longer message interfaces.
+    line = prefix * join(arguments, ", ") * ")" * suffix
+    if length(line) <= 92
+
+        println(io, line)
+
+    else
+
+        println(io, rstrip(prefix))
+        for argument in arguments
+            println(io, indentation, "    ", argument, ",")
+        end
+        println(io, indentation, ")", suffix)
+
+    end
+
+end
+
+# Triple-quoted docstrings keep generated documentation readable. Escape each source
+# line as a Julia string first, so quotes, backslashes, and dollar signs remain prose.
+function print_julia_description(io, text, indent)
+
+    println(io, indent, "\"\"\"")
+    for line in split(chomp(text), '\n')
+        println(io, indent, chop(repr(line); head = 1, tail = 1))
+    end
+    println(io, indent, "\"\"\"")
+
+end
+
+# A message has two orders: physical fields for layout and declared arguments for callers.
+# Print both constructors here so they cannot accidentally disagree about that mapping.
+function print_message(io, definition)
+
+    # These lists refer to the same fields but serve different sides of the constructor:
+    # arguments is its public interface, and stored is the order passed to new.
+    name = last(split(definition.type.name, '.'))
+    arguments = [field.name for field in definition.fields]
+    stored = [definition.fields[index].name for index in definition.storage_order]
+    parameters = definition.parameters
+    suffix = isempty(parameters) ? "" : "{" * join(parameters, ", ") * "}"
+    constructor = name * suffix
+    where_clause = isempty(parameters) ? "" : " where " * suffix
+
+    # A type docstring also lets Julia register docstrings attached to individual fields.
+    documented_fields = any(field -> !isempty(field.description), definition.fields)
+    if !isempty(definition.description) || documented_fields
+        print_julia_description(io, definition.description, "")
+    end
+    println(io, "struct $constructor\n")
+    println(io, "    # Decreasing alignment; declaration order breaks ties.")
+    for index in definition.storage_order
+        field = definition.fields[index]
+        isempty(field.description) || print_julia_description(io, field.description, "    ")
+        println(io, "    $(field.name)::$(julia_type(field))")
+    end
+
+    # An inner constructor prevents Julia from adding a physical-order constructor.
+    # new converts each argument to its declared field type after the arguments reorder.
+    println(io)
+    println(io, "    # Positional arguments follow the declaration order in the input.")
+    print_arguments(
+        io,
+        "    function $constructor(",
+        arguments,
+        "    ";
+        suffix = where_clause,
+    )
+    for parameter in parameters
+
+        condition = "$parameter isa Base.Int64 && 0 < $parameter <= Base.typemax(Base.Int)"
+        message = repr("$parameter must be a positive Int64 length")
+        error = "Base.ArgumentError($message)"
+        println(io, "        $condition ||")
+        println(io, "            Base.throw($error)")
+
+    end
+    print_arguments(io, "        return new$suffix(", stored, "        ")
+    println(io, "    end\n")
+    println(io, "end\n")
+
+    # Delegating keyword construction keeps its conversions identical to the positional
+    # constructor, rather than emitting a second independent field-initialization path.
+    println(io, "# Keyword arguments use the positional constructor's conversions.")
+    print_arguments(io, "function $constructor(; ", arguments, ""; suffix = where_clause)
+    print_arguments(io, "    return $constructor(", arguments, "    ")
+    println(io, "end\n")
+
+end
+
+# Render one namespace per file, collecting source strings before touching the filesystem.
+# path mirrors the namespace nesting and supplies both relative filenames and the root name.
+function render_julia!(files, namespace, path)
+
+    # Export declarations, but leave implementation dependencies private to each module.
+    io = IOBuffer()
+    name = namespace.name
+    println(io, "# Generated by GradientMicroIDL.\nmodule $name\n")
+    names = [last(split(item.type.name, '.')) for item in namespace.enums]
+    append!(names, [last(split(item.type.name, '.')) for item in namespace.messages])
+    append!(names, [child.name for child in namespace.namespaces])
+    isempty(names) || println(io, "export ", join(names, ", "), "\n")
+    println(io, "import StaticArrays, EnumX")
+
+    # Every parent imports the root, so a child can obtain it from its immediate parent.
+    # Resolved cross-namespace field types can then use the same root-qualified spelling.
+    length(path) > 1 && println(io, "import ..$(first(path))")
+    println(io)
+
+    # Emit the same section order used by the parser. Child modules are included only
+    # after the parent's own types, and sibling includes retain their declaration order.
+    for definition in namespace.enums
+        print_enum(io, definition)
+    end
+    for definition in namespace.messages
+        print_message(io, definition)
+    end
+    for child in namespace.namespaces
+
+        println(io, "include(\"$(child.name)/$(child.name).jl\")")
+        render_julia!(files, child, [path; child.name])
+
+    end
+    isempty(namespace.namespaces) || println(io)
+    println(io, "end # module $name")
+
+    # Store the relative destination alongside its complete source for the writing pass.
+    push!(files, joinpath(path..., "$name.jl") => String(take!(io)))
+
+end
+
+# Reject ambiguous destinations on every host, even when its filesystem distinguishes
+# case. Identifiers are ASCII, so lowercase is sufficient; no Unicode folding is needed.
+# Checking the complete rendered list keeps errors from leaving a partially written tree.
+function validate_julia_paths(files)
+
+    destinations = Dict{String, String}()
+    for (path, _) in files
+
+        key = lowercase(path)
+        if haskey(destinations, key)
+            invalid(path, "output path collides with $(destinations[key]) when ignoring case")
+        end
+        destinations[key] = path
+
+    end
+
+end
+
+# This is the only filesystem-writing step. It accepts a fully validated namespace and
+# returns the root filename so callers do not have to reconstruct the directory convention.
+function write_julia(namespace, out_dir)
+
+    # Render everything before creating files, so definition errors cannot leave a
+    # partially written tree.
+    files = Pair{String, String}[]
+    render_julia!(files, namespace, [namespace.name])
+    validate_julia_paths(files)
+
+    # Create only the directories needed by this tree and overwrite its generated files.
+    # Other files in the destination are left alone.
+    for (relative_path, source) in files
+
+        filename = abspath(out_dir, relative_path)
+        mkpath(dirname(filename))
+        write(filename, source)
+
+    end
+    return abspath(out_dir, namespace.name, namespace.name * ".jl")
+
+end

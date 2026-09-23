@@ -1,0 +1,38 @@
+name: Run tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write # Allows julia-actions/cache to remove its old caches.
+
+jobs:
+  test:
+    name: Julia 1.12 / ${{ matrix.os }} / ${{ matrix.cxx }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cxx: g++
+          - os: macos-latest
+            cxx: clang++
+    env:
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1.12'
+          arch: 'default' # Match Julia to the compiler's native target architecture.
+      - uses: julia-actions/cache@v2
+      - name: Check compiler
+        run: $CXX --version
+      - name: Instantiate the test workspace
+        run: julia --project=test -e 'using Pkg; Pkg.instantiate()'
+      - name: Run Julia and compiled C++ tests
+        run: julia --project=test test/runtests.jl

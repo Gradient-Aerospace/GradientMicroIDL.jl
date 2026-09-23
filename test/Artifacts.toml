@@ -1,0 +1,9 @@
+# Official Eigen 5.0.0 source release. Only the tests request this artifact; generating
+# Julia or C++ source does not download Eigen or require a compiler.
+[eigen]
+git-tree-sha1 = "f044b4edacc0054edaffbcb847b2e2c5c1807274"
+lazy = true
+
+    [[eigen.download]]
+    url = "https://gitlab.com/libeigen/eigen/-/archive/5.0.0/eigen-5.0.0.tar.gz"
+    sha256 = "315c881e19e17542a7d428c5aa37d113c89b9500d350c433797b730cd449c056"

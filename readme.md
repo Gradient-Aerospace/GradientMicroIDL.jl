@@ -1,226 +1,655 @@
 # GradientMicroIDL
 
-This Julia package generates Julia and C++ struct definitions for simple messages so that they will have the same memory layout and can be passed back and forth from Julia via a `ccall`.
+This Julia package generates immutable Julia types and corresponding C++ structs for simple messages. Both generators use the same field ordering and layout calculations, with the goal of sharing messages through `ccall` without translating their contents.
 
-## Specifications
+## Example
 
-Valid types for fields of a message:
+Let's start with a simple example. We'll define a type, generate Julia and C++ definitions for it, and show how we can call C++ code that uses the types on the interface directly from Julia.
 
-* Signed and unsigned 8-, 16-, 32-, and 64-bit integers
-* 32- and 64-bit floating point numbers
-* 8-bit chars
-* Enums of any underlying integer type
-* Fixed-size vectors and matrices of any valid type
-* Prior message types
+### Message Specification
 
-Matrices are always interpreted as column-major.
+Here's a first example using a simplified typical GNSS message, stored in [`examples/gnss.yaml`](examples/gnss.yaml):
 
-The memory layout is always little-endian.
-
-Messages can use already defined messages as types for their fields.
-
-Messages and enums can be placed inside of namespaces.
-
-Namespaces can only reference prior namespaces, so that namespaces form a directed, acyclic graph.
-
-Note that unions and non-fixed-length arrays are not allowed.
-
-All characters used for field/enum/namespace names must be 8-bit chars.
-
-### Definition
-
-Enums, messages, and namespaces are defined in YAML file with `enums`, `messages`, and `namespaces` fields. This set defines a "namespace".
-
-Each named enum entry should be a dictionary containing `type` (an integer type) and `values` (a dictionary of names and their values).
-
-Each named message entry should be a dictionary of field names and their types.
-
-Each named namespace entry should be either (1) a namespace, with `enums`, `messages`, and `namespaces` fields, or (2) a YAML file name that the namespace can be loaded from.
-
-Here is a simple example with an enum and two messages at the global namespace:
-
-```
+```yaml
+# gnss.yaml
 enums:
   GNSSFixType:
     type: uint8
     values:
       none: 0
+      fix_2d: 2
       fix_3d: 3
-      float_fix: 5
-      int_fix: 6
 messages:
-  GNSSTimeStamp:
-    weeks: uint16
-    microseconds: uint64
-  GNSSMeasurement:
-    timestamp: GNSSTimeStamp
-    fix_type: GNSSFixType
-    position_ecef: float64[3]
-    velocity_ecef: float64[3]
-    position_covariance_ecef: float64[3,3]
-    velocity_covariance_ecef: float64[3,3]
+  GNSSTimestamp:
+    fields:
+      weeks: uint32
+      milliseconds: uint32
+  GNSSPositionMeasurement:
+    fields:
+      timestamp: GNSSTimestamp
+      fix_type: GNSSFixType
+      position_ecef: float64[3]
+      position_covariance_ecef: float64[3,3]
+  LatitudeLongitudeAltitudeWGS84:
+    fields:
+      latitude: float64
+      longitude: float64
+      altitude: float64
 ```
 
-Here is an example with deeper structure:
+### Message Generation
+
+Let's build Julia and C++ definitions for that type. We'll store the outputs in `build/gnss/julia` and `build/gnss/cpp`. We'll use `GNSS` for the top-level module/namespace.
+
+```julia
+using GradientMicroIDL
+import YAML
+
+generate_julia("examples/gnss.yaml", "build/gnss/julia", "GNSS")
+generate_cpp("examples/gnss.yaml", "build/gnss/cpp", "GNSS")
+```
+
+That produces `build/gnss/julia/GNSS/GNSS.jl` and `build/gnss/cpp/GNSS/GNSS.hpp`. We'll revisit these types below to look at them in more depth. For now, it suffices to say that the types look much like one might expect.
+
+### C++ Code and Interface from Julia
+
+Let's write a short C++ program that uses this struct:
+
+```c++
+#include "build/gnss/cpp/GNSS/GNSS.hpp"
+
+extern "C" {
+
+bool extract_lla(
+    const GNSS::GNSSPositionMeasurement* measurement,
+    GNSS::LatitudeLongitudeAltitudeWGS84* lla
+) {
+    if (measurement->fix_type == GNSS::GNSSFixType::fix_3d) {
+        lla->latitude  = 1.; // Placeholders
+        lla->longitude = 2.;
+        lla->altitude  = 3.;
+        return true;
+    }
+    return false;
+}
+
+} // extern "C"
+```
+
+We can compile that to a library using whatever is relevant for our build system. Let's suppose we've done that and now have `libgnss.so` available to us.
+
+Then, we can call it from Julia:
+
+```julia
+using Libdl # For calling libraries
+using StaticArrays
+
+# Include our new types.
+include("build/gnss/julia/GNSS/GNSS.jl")
+
+# Load the library.
+const libgnss = dlopen(joinpath(@__DIR__, "build", "libgnss.$dlext"))
+
+# Find the function we want to call:
+extract_lla = dlsym(libgnss, :extract_lla)
+
+# Make a measurement to send.
+measurement = GNSS.GNSSPositionMeasurement(;
+    timestamp = GNSS.GNSSTimestamp(;
+        weeks = 2392,
+        milliseconds = 86400000,
+    ),
+    fix_type = GNSS.GNSSFixType.fix_3d,
+    position_ecef = SA[6378137., 0., 0.],
+    position_covariance_ecef = SA[
+        25.  0.  0.;
+         0. 25.  0.;
+         0.  0. 25.;
+    ],
+)
+
+# Declare a reference to our intended output.
+lla_ref = Ref{GNSS.LatitudeLongitudeAltitudeWGS84}()
+
+# Now we can call our C++ function.
+success = ccall(
+    extract_lla,
+    Bool,
+    (Ref{GNSS.GNSSPositionMeasurement}, Ref{GNSS.LatitudeLongitudeAltitudeWGS84}),
+    Ref(measurement),
+    lla_ref,
+)
+
+# The output LLA is available from our reference:
+@assert success
+lla = lla_ref[]
+```
+
+### Julia Code
+
+For reference here's the Julia code that results from `generate_julia`. Note that fields have been automatically rearranged to decrease how much struct padding is necessary to represent this type in memory, but that constructors have been generated that preserve the field order in the YAML file. In other words, the actual physical layout of the struct is an implementation detail; the struct can still be created using the order provided in the YAML-file description.
+
+```julia
+# Generated by GradientMicroIDL.
+module GNSS
+
+export GNSSFixType, GNSSTimestamp, GNSSPositionMeasurement, LatitudeLongitudeAltitudeWGS84
+
+import StaticArrays, EnumX
+
+EnumX.@enumx GNSSFixType::Base.UInt8 begin
+    none = 0
+    fix_2d = 2
+    fix_3d = 3
+end
+
+struct GNSSTimestamp
+
+    # Decreasing alignment; declaration order breaks ties.
+    weeks::Base.UInt32
+    milliseconds::Base.UInt32
+
+    # Positional arguments follow the declaration order in the input.
+    function GNSSTimestamp(weeks, milliseconds)
+        return new(weeks, milliseconds)
+    end
+
+end
+
+# Keyword arguments use the positional constructor's conversions.
+function GNSSTimestamp(; weeks, milliseconds)
+    return GNSSTimestamp(weeks, milliseconds)
+end
+
+struct GNSSPositionMeasurement
+
+    # Decreasing alignment; declaration order breaks ties.
+    position_ecef::StaticArrays.SVector{3, Base.Float64}
+    position_covariance_ecef::StaticArrays.SMatrix{3, 3, Base.Float64, 9}
+    timestamp::GNSS.GNSSTimestamp
+    fix_type::GNSS.GNSSFixType.T
+
+    # Positional arguments follow the declaration order in the input.
+    function GNSSPositionMeasurement(
+        timestamp,
+        fix_type,
+        position_ecef,
+        position_covariance_ecef,
+    )
+        return new(position_ecef, position_covariance_ecef, timestamp, fix_type)
+    end
+
+end
+
+# Keyword arguments use the positional constructor's conversions.
+function GNSSPositionMeasurement(;
+    timestamp,
+    fix_type,
+    position_ecef,
+    position_covariance_ecef,
+)
+    return GNSSPositionMeasurement(
+        timestamp,
+        fix_type,
+        position_ecef,
+        position_covariance_ecef,
+    )
+end
+
+struct LatitudeLongitudeAltitudeWGS84
+
+    # Decreasing alignment; declaration order breaks ties.
+    latitude::Base.Float64
+    longitude::Base.Float64
+    altitude::Base.Float64
+
+    # Positional arguments follow the declaration order in the input.
+    function LatitudeLongitudeAltitudeWGS84(latitude, longitude, altitude)
+        return new(latitude, longitude, altitude)
+    end
+
+end
+
+# Keyword arguments use the positional constructor's conversions.
+function LatitudeLongitudeAltitudeWGS84(; latitude, longitude, altitude)
+    return LatitudeLongitudeAltitudeWGS84(latitude, longitude, altitude)
+end
+
+end # module GNSS
+```
+
+### C++ Code
+
+Here is the resulting C++. We can see the same argument order as for Julia, and also that size checks are inserted, and Eigen wrappers are generated for the numeric arrays.
+
+```c++
+// Generated by GradientMicroIDL. Requires C++17.
+// Layout assertions describe the Julia host used for generation.
+#pragma once
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+#include <Eigen/Core>
+
+namespace GNSS {
+
+    enum class GNSSFixType : ::std::uint8_t {
+        none = 0ULL,
+        fix_2d = 2ULL,
+        fix_3d = 3ULL,
+    };
+
+    struct GNSSTimestamp {
+
+        // Decreasing alignment; declaration order breaks ties.
+        ::std::uint32_t weeks{};
+        ::std::uint32_t milliseconds{};
+
+        // Value-initialize fields when no arguments are supplied.
+        GNSSTimestamp() = default;
+
+        // Arguments use input order; initializers use storage order.
+        explicit GNSSTimestamp(
+            ::std::uint32_t weeks,
+            ::std::uint32_t milliseconds
+        )
+            : weeks{weeks},
+              milliseconds{milliseconds}
+        {
+        }
+
+    };
+
+    static_assert(::std::is_standard_layout_v<GNSSTimestamp>);
+    static_assert(::std::is_trivially_copyable_v<GNSSTimestamp>);
+    static_assert(sizeof(GNSSTimestamp) == 8);
+    static_assert(alignof(GNSSTimestamp) == 4);
+    static_assert(offsetof(GNSSTimestamp, weeks) == 0);
+    static_assert(offsetof(GNSSTimestamp, milliseconds) == 4);
+
+    struct GNSSPositionMeasurement {
+
+        // Decreasing alignment; declaration order breaks ties.
+        double position_ecef[3]{};
+        double position_covariance_ecef[9]{};
+        ::GNSS::GNSSTimestamp timestamp{};
+        ::GNSS::GNSSFixType fix_type{};
+
+        // Value-initialize fields when no arguments are supplied.
+        GNSSPositionMeasurement() = default;
+
+        // Arguments use input order; initializers use storage order.
+        explicit GNSSPositionMeasurement(
+            const ::GNSS::GNSSTimestamp& timestamp,
+            ::GNSS::GNSSFixType fix_type,
+            const double (&position_ecef)[3],
+            const double (&position_covariance_ecef)[9]
+        )
+            : position_ecef{},
+              position_covariance_ecef{},
+              timestamp{timestamp},
+              fix_type{fix_type}
+        {
+            ::std::copy_n(position_ecef, 3, this->position_ecef);
+            ::std::copy_n(position_covariance_ecef, 9, this->position_covariance_ecef);
+        }
+
+        // The returned view borrows this field's storage.
+        auto position_ecef_eigen() & {
+            using Matrix = ::Eigen::Matrix<double, 3, 1, ::Eigen::ColMajor>;
+            return ::Eigen::Map<Matrix, ::Eigen::Unaligned>(
+                this->position_ecef
+            );
+        }
+
+        auto position_ecef_eigen() const & {
+            using Matrix = ::Eigen::Matrix<double, 3, 1, ::Eigen::ColMajor>;
+            return ::Eigen::Map<const Matrix, ::Eigen::Unaligned>(
+                this->position_ecef
+            );
+        }
+
+        void position_ecef_eigen() && = delete;
+        void position_ecef_eigen() const && = delete;
+
+        // The returned view borrows this field's storage.
+        auto position_covariance_ecef_eigen() & {
+            using Matrix = ::Eigen::Matrix<double, 3, 3, ::Eigen::ColMajor>;
+            return ::Eigen::Map<Matrix, ::Eigen::Unaligned>(
+                this->position_covariance_ecef
+            );
+        }
+
+        auto position_covariance_ecef_eigen() const & {
+            using Matrix = ::Eigen::Matrix<double, 3, 3, ::Eigen::ColMajor>;
+            return ::Eigen::Map<const Matrix, ::Eigen::Unaligned>(
+                this->position_covariance_ecef
+            );
+        }
+
+        void position_covariance_ecef_eigen() && = delete;
+        void position_covariance_ecef_eigen() const && = delete;
+
+    };
+
+    static_assert(::std::is_standard_layout_v<GNSSPositionMeasurement>);
+    static_assert(::std::is_trivially_copyable_v<GNSSPositionMeasurement>);
+    static_assert(sizeof(GNSSPositionMeasurement) == 112);
+    static_assert(alignof(GNSSPositionMeasurement) == 8);
+    static_assert(offsetof(GNSSPositionMeasurement, position_ecef) == 0);
+    static_assert(offsetof(GNSSPositionMeasurement, position_covariance_ecef) == 24);
+    static_assert(offsetof(GNSSPositionMeasurement, timestamp) == 96);
+    static_assert(offsetof(GNSSPositionMeasurement, fix_type) == 104);
+
+    struct LatitudeLongitudeAltitudeWGS84 {
+
+        // Decreasing alignment; declaration order breaks ties.
+        double latitude{};
+        double longitude{};
+        double altitude{};
+
+        // Value-initialize fields when no arguments are supplied.
+        LatitudeLongitudeAltitudeWGS84() = default;
+
+        // Arguments use input order; initializers use storage order.
+        explicit LatitudeLongitudeAltitudeWGS84(
+            double latitude,
+            double longitude,
+            double altitude
+        )
+            : latitude{latitude},
+              longitude{longitude},
+              altitude{altitude}
+        {
+        }
+
+    };
+
+    static_assert(::std::is_standard_layout_v<LatitudeLongitudeAltitudeWGS84>);
+    static_assert(::std::is_trivially_copyable_v<LatitudeLongitudeAltitudeWGS84>);
+    static_assert(sizeof(LatitudeLongitudeAltitudeWGS84) == 24);
+    static_assert(alignof(LatitudeLongitudeAltitudeWGS84) == 8);
+    static_assert(offsetof(LatitudeLongitudeAltitudeWGS84, latitude) == 0);
+    static_assert(offsetof(LatitudeLongitudeAltitudeWGS84, longitude) == 8);
+    static_assert(offsetof(LatitudeLongitudeAltitudeWGS84, altitude) == 16);
+
+} // namespace GNSS
 
 ```
+
+Now that we've seen an end-to-end example, the rest of the readme focuses on more complete specifications.
+
+## Definitions
+
+A definition file describes a namespace through three optional sections: `enums`, `messages`, and `namespaces`. Each section can be omitted or be an empty dictionary, such as `enums: {}` or `messages: {}`. A namespace with no declarations is also valid.
+
+The nonempty requirement applies to individual declarations: a named message must have at least one entry in its `fields` dictionary, and a named enum must have at least one entry in its `values` dictionary. Empty messages are excluded because an empty Julia struct occupies zero bytes while an ordinary empty C++ struct occupies storage. Empty enums are excluded by the current schema; this is a package restriction, not a requirement that the `enums` section contain declarations. A bare section such as `enums:` is YAML null rather than an empty dictionary; `{}` makes an explicitly empty section unambiguous.
+
+### Messages and documentation
+
+Each message has a required `fields` dictionary, an optional `description` string, and an optional `parameters` dictionary, as shown below. A field can be a type string, or a dictionary with a required `type` string and an optional `description` string:
+
+```yaml
+messages:
+  MotorParameters:
+    description: Stores the parameters for one motor
+    fields:
+      position: float64[3]
+      torque_constant:
+        type: float64
+        description: Converts the motor command to torque
+  ControlParameters:
+    description: |
+      Stores all of the parameters used by the controller.
+      Motors follow the same order as the motor commands.
+    parameters:
+      N: int64
+    fields:
+      num_motors:
+        type: uint32
+        description: The number of motors used by this controller
+      motors:
+        type: MotorParameters[N]
+        description: Parameters for each motor, in command order
+```
+
+This example is stored in [`examples/control.yaml`](examples/control.yaml), together with the concrete and parameterized uses below.
+
+Message descriptions become Julia type docstrings and C++ documentation comments. Field descriptions become Julia field docstrings and C++ member comments. Descriptions are optional and do not affect storage. Unknown keys are rejected to catch misspellings.
+
+### Length parameters
+
+Messages can have parameters. Currently, parameters are only allowed to control the length of arrays.
+
+Parameters are declared in the `parameters` section, in argument order. For now, each parameter must declare `int64` and represents a positive length that also fits the generating host's `Int`. There are no default values, arithmetic expressions, or element-type parameters. Parameter names are local to the message and cannot also be field names.
+
+A reference supplies arguments in braces. Arguments can be positive integer literals or parameters declared by the containing message. For example, following the definitions above:
+
+```yaml
+messages:
+  VehicleParameters:
+    fields:
+      control: ControlParameters{4}
+  FleetParameters:
+    parameters:
+      N: int64
+      M: int64
+    fields:
+      control: ControlParameters{N}[M]
+```
+
+In `examples/control.yaml`, these entries follow the earlier definitions in the same `messages` dictionary; the two excerpts do not represent two separate `messages` keys. The first uses a concrete four-motor controller. The second contains `M` controllers, each with capacity for `N` motors. All template arguments must be supplied; bare `ControlParameters` is not a concrete field type.
+
+Julia generation produces parametric types such as `ControlParameters{N}`; C++ generation produces templates such as `ControlParameters<N>`. Julia callers explicitly supply lengths for both positional and keyword constructors:
+
+```julia
+motor = MotorParameters(;
+    position = SA[0.0, 0.0, 0.0],
+    torque_constant = 1.0,
+)
+controls = ControlParameters{2}(;
+    num_motors = 2,
+    motors = SVector(motor, motor),
+)
+```
+
+This assumes the generated message names and StaticArrays have been imported. Lengths are type parameters, not additional stored fields, and the generator does not infer them from constructor arguments. An exported C function uses a concrete C++ instantiation, such as `ControlParameters<2>*`, paired with Julia `Ref{ControlParameters{2}}`. Changing the Julia parameter does not instantiate new code in an already compiled C++ library.
+
+Parameters can determine vector lengths and arguments of nested messages.
+
+Matrix dimensions cannot be parameterized currently and must use literal values; `float64[N,3]` is not supported. A fixed-shape matrix can still contain parameterized messages, for example `ControlParameters{N}[2,3]`.
+
+Julia itself supports zero-length arrays, but this package rejects zero lengths for both generators and for generated Julia constructors because the C++ storage requires positive lengths. For an optional collection, capacity can be at least one while a separate active-count field (such as `num_motors` in the example above) is zero. Both languages still store the reserved element; application code ignores it when the count is zero. A count such as `num_motors` is an ordinary field: the application is responsible for maintaining `0 ≤ num_motors ≤ N`.
+
+### Field types and enums
+
+| Definition | Julia | C++ |
+|---|---|---|
+| `int8`, `int16`, `int32`, `int64` | Corresponding signed integer | Corresponding `std::int*_t` |
+| `uint8`, `uint16`, `uint32`, `uint64` | Corresponding unsigned integer | Corresponding `std::uint*_t` |
+| `float32`, `float64` | `Float32`, `Float64` | `float`, `double` |
+| `char` | `UInt8` | `std::uint8_t` |
+| Enum | EnumX enum type | Scoped `enum class` |
+| Message | immutable struct | struct |
+| `T[N]` | `SVector{N,T}` | Built-in `T[N]` array |
+| `T[R,C]` with literal dimensions | `SMatrix{R,C,T,R*C}` | Built-in `T[R*C]` array |
+
+`char` represents a byte, not Julia's four-byte `Char`. Array elements can be primitives, enums, or messages. All arrays are stored inline. Matrices are column-major; the C++ flattened index is `row + rows * column`, using zero-based indices. Unions, pointers, and variable-length storage are outside this definition language.
+
+Enums have a required integer `type` and a `values` dictionary, as in the opening GNSS example. Their underlying width is preserved in both languages. Enum values must fit the declared integer type.
+
+YAML.jl parses integer values as Julia `Int`, which is `Int64` on 64-bit systems. Consequently, a `uint64` enum defined in YAML can only specify values from zero through `typemax(Int64)` (9,223,372,036,854,775,807). Values in the upper half of the `UInt64` range cause a parsing overflow; they are not converted or truncated. Native specifications and the dictionary API can supply the full `UInt64` range directly. The JSON reader also preserves integers throughout this range. Included YAML files retain the parsing limitation. This restriction does not affect `uint64` message fields.
+
+### Namespaces, includes, and references
+
+Each entry in `namespaces` can contain an inline namespace or a filename to include at that location. [`examples/messages.yaml`](examples/messages.yaml) ties the opening GNSS definitions into a deeper structure:
+
+```yaml
 namespaces:
   Common:
     messages:
       LocalTimeStamp:
-        microseconds: uint64
+        fields:
+          microseconds: uint64
   Sensors:
     namespaces:
       Barometer:
         messages:
           BarometerMeasurement:
-            timestamp: Common.LocalTimeStamp
-            pressure: float32
-            temperature: float32
-      GNSS: gnss.yaml # A file containing the above structure
+            fields:
+              timestamp: Common.LocalTimeStamp
+              pressure: float32
+              temperature: float32
+      GNSS: gnss.yaml
   GNC:
     namespaces:
       Navigation:
         messages:
           NavInputs:
-            barometer_measurement::Sensors.BarometerMeasurement
-            gnss_measurement::Sensors.GNSS.GNSSMeasurement
+            fields:
+              barometer_measurement: Sensors.Barometer.BarometerMeasurement
+              gnss_measurement: Sensors.GNSS.GNSSPositionMeasurement
 ```
 
-In a namespace definition, any unnecessary field can be omitted.
+Included filenames are resolved relative to their containing file. Recursive includes and duplicate YAML keys are rejected. Within each namespace, enums are processed first, then messages, then child namespaces; declaration order within each group is preserved. References must name previously defined types. A bare name resolves locally, while a dotted name starts at the root namespace without spelling the root module name. Parameterized references follow the same rule, for example `Controllers.ControlParameters{4}`.
 
-Vectors and matrices are specified as the type with the size of each dimension, as in `int32[3]` for a 3-element vector of 32-bit integers or `float64[3, 4]` for a 3-by-4 matrix of `float64`.
+Julia generation rejects output paths that differ only in letter case, such as sibling namespaces `Sensors` and `sensors`, before writing any files. This check applies on all platforms so the generated tree can be used on case-insensitive filesystems.
 
-### Constraints
+Names use ASCII letters and digits with underscores, beginning with a letter. Language keywords and generated-code bindings (`Base`, `Core`, `StaticArrays`, `EnumX`, `include`, `eval`, and `new`) are reserved, as are names containing double underscores. Declarations cannot reuse primitive names or the root or containing namespace name. Fields cannot reuse the containing message name or its parameter names. Enum declarations cannot be named `T`, which EnumX reserves for its internal type. Enum values cannot reuse `T` or their enum name. Julia's special names `ccall` and `cglobal` are also reserved because they cannot be constructor argument names. Parameters cannot reuse an enclosing namespace or message name or a primitive name. For C++ generation, generated Eigen accessor names must not collide with fields, parameters, or the message name; the parameter name `Matrix` and root namespace names `std` and `Eigen` are also reserved.
 
-Messages must form a directed-acyclic graph. That is, message X cannot have any fields whose types contain message X anywhere.
+## Generated layout and constructors
 
-Module Y cannot reference an as-yet undefined Module Z. Modules must be ordered with the fewest dependencies first.
+Fields are stored in decreasing alignment order, with declaration order breaking ties. Field size does not break ties. Positive lengths do not change array alignment, so this order remains fixed across parameter values, including nested parameterized messages. Native padding is retained, including the trailing padding needed for arrays of structs.
 
-Message names and enums must be valid Julia and C++ struct names.
+Both positional constructors follow declared field order regardless of physical storage order. Julia also provides keyword constructors; all fields are required, and values are converted to their declared types. A parameterized Julia constructor requires positive `Int64` length arguments. Ordinary Julia types are immutable and `isbits`; parameterized types become concrete `isbits` types when supplied valid lengths.
 
-### Implementation
+C++ structs have a zero-initializing default constructor and an explicit value constructor. Primitive and enum arguments are passed by value, message arguments by const reference, and array arguments by const reference to a built-in array of the required length. Arrays are copied into the struct's own storage. Constructors do not accept Eigen expressions directly. Zero initialization applies recursively to fields, including enums whose zero value may not have a named enumerator; padding bytes are unspecified.
 
-All messages can have fields in any order. In their implementations, they are rearranged in order of decreasing memory footprint with padding at the end. This is required for Eigen, makes translation between languages instant, and otherwise minimizes padding. Note that constructors are generated to preserve the order listed in the YAML file, not the order that the fields appear in the struct definition.
+### Eigen views
 
-### Julia Implementation
+Numeric array fields have mutable and const `<field>_eigen()` methods, as in the opening example. These return `Eigen::Map` views over the existing storage, add no fields, and use unaligned maps. Vectors map to column vectors. Matrices preserve their declared shape and column-major order; a single-row matrix uses Eigen's required `RowMajor` option, which gives the same element order for that shape. Character, enum, and message arrays do not have Eigen accessors.
 
-Julia types are generated with keyword constructors.
+A view borrows the message storage and must not outlive it. Accessors reject temporary messages, and const accessors expose read-only elements. Numeric array element counts must fit Eigen's compile-time `int` range. This is checked during generation for literal lengths and by C++ assertions for parameter-dependent lengths.
 
-Enums use EnumX.
+### Layout checks and interface limits
 
-Vectors and matrices will use StaticArrays. Note: Modern versions on StaticArrays no longer "choke" on large sizes due to their tuple-backed behavior. Even 100-by-100 matrix multiplication with SMatrix is reasonable.
+Generated C++ contains checks for sizes, alignments, field offsets, standard layout, and trivial copyability. Expected layouts come from the Julia host used for generation. For ordinary messages, these checks run when the header is compiled. For templates, checks requiring a complete type are in constructor bodies and run when those constructors are instantiated; positive-length and Eigen-length checks are in the class definition. Merely declaring a pointer to an uninstantiated template does not check its layout.
 
-All symbols in a module are exported.
+The tests independently compare the C++ compiler's layout with actual generated Julia types and exercise pointer-based calls. They also check by-value returns for small integer structs, floating-point structs, and a large nested message in the macOS/Clang and Linux/GCC CI jobs. Julia callers specify the generated message type as the `ccall` return type; Julia handles the native return convention. Passing message arguments by value is not yet tested. The intended interface assumes matching native layouts, little-endian storage, and matching floating-point representations. This is not a portable binary format; there is no byte swapping or serialization. Return conventions are platform-specific, so these tests do not establish by-value compatibility on other platforms, such as Windows.
 
-### C++ Implementation
+For calls like the opening example, an initialized Julia `Ref(message)` supplies readable input storage. `Ref{Message}()` supplies uninitialized output storage that C++ must fill before Julia reads it. A writable pointer can also update an initialized `Ref` in place; Julia reads the resulting message with `reference[]`. Passing the `Ref` directly to `ccall` keeps it alive during the call. C++ borrows that storage and should not retain the pointer after the call. On a failure path, output should only be read if the function promises it has initialized it.
 
-C++ types are generated without struct-packing.
+## Generation API and build workflow
 
-Vectors and matrices are rendered as Eigen on the C++ side.
-
-## Generating Code
-
-When generating the code, the required arguments are (1) the top-level file, (2) the directory in which files should be generated, and (3) the namespace/module name to use for the top level.
+The native input is a `NamespaceSpec`, built from ordinary Julia objects. These objects describe declarations; they do not contain calculated sizes, alignments, or resolved references. For example, we can describe a controller directly:
 
 ```julia
-generate_julia("my_messages.yaml", "my_julia_definitions", "MyMessages")
-generate_cpp("my_messages.yaml", "my_cpp_definitions", "MyMessages")
+using GradientMicroIDL
+
+specification = NamespaceSpec(;
+    messages = [
+        MessageSpec(
+            "MotorParameters";
+            fields = [
+                FieldSpec("position", "float64[3]"),
+                FieldSpec("torque_constant", "float64"),
+            ],
+        ),
+        MessageSpec(
+            "ControlParameters";
+            description = "Parameters for a controller with N motors.",
+            parameters = [ParameterSpec("N")],
+            fields = [
+                FieldSpec("num_motors", "uint32"),
+                FieldSpec("motors", "MotorParameters[N]"; description = "In command order."),
+            ],
+        ),
+    ],
+)
+
+julia_file = generate_julia(specification, "build/control/julia", "Control")
+cpp_header = generate_cpp(specification, "build/control/cpp", "Control")
 ```
 
-Note that generation always uses one top-level file, generating one namespace/module that contains all of the others.
+Vectors preserve declaration order. `EnumSpec("Mode", "uint8", ["idle" => 0, "active" => 1])` declares an enum. Child namespaces use ordered pairs, such as `NamespaceSpec(; namespaces = ["Controllers" => specification])`. A child can instead be an `IncludeSpec("control.yaml")` or `IncludeSpec("control.json")`; the generators' `base_dir` keyword locates includes in directly constructed specifications and defaults to `pwd()`.
 
-### Example Julia
+`NamespaceSpec(definitions)` converts a dictionary using the schema described above. The generators also accept dictionaries directly as a convenience. Dictionary iteration order determines declaration and constructor order; `OrderedDict` makes that order explicit. Dictionary conversion checks structure, while generation checks names, references, parameter usage, and layouts for all input paths before writing files.
 
-The above example generates Julia code that approximately looks like the following (assuming "MyMessages" is the top-level module name given to `generate_julia`):
+### Optional YAML and JSON readers
+
+File readers are Julia package extensions. The generation environment needs the corresponding package installed and loaded: `import YAML` for `.yaml` and `.yml`, or `import JSON` for `.json`. Native specifications and dictionaries do not require either reader. Both file readers preserve declaration order and reject duplicate keys. When creating JSON with other tools, their serializers must also preserve the intended member order.
+
+Both generators accept a filename, or we can load a specification once and reuse it:
 
 ```julia
-# MyMessages.jl
-module MyMessages
-export Common, Sensors, GNC
-import StaticArrays, EnumX
-include("Common/Common.jl")
-include("Sensors/Sensors.jl")
-include("GNC/GNC.jl")
-end
+using GradientMicroIDL
+import YAML
 
-# Common/Common.jl
-module Common
-export LocalTimeStamp
-import StaticArrays, EnumX
-import ..MyMessages
-@kwdef struct LocalTimeStamp
-    microseconds::UInt64
-end
-end
+specification = load_specification("examples/messages.yaml")
+julia_file = generate_julia(specification, "build/messages/julia", "MyMessages")
+cpp_header = generate_cpp(specification, "build/messages/cpp", "MyMessages")
 
-# Sensors/Sensors.jl
-module Sensors
-export Barometer, GNSS
-import StaticArrays, EnumX
-import ..MyMessages
-include("Barometer/Barometer.jl")
-include("GNSS/GNSS.jl")
-end
-
-# Sensors/Barometer/Barometer.jl
-module Barometer
-export BarometerMeasurement
-import StaticArrays, EnumX
-import ..MyMessages
-@kwdef struct BarometerMeasurement
-    timestamp::MyMessages.Common.LocalTimeStamp
-    pressure::Float32
-    temperature::Float32
-end
-end
-
-# Sensors/GNSS/GNSS.jl
-module GNSS
-export GNSSFixType, GNSSTimeStamp, GNSSMeasurement
-import StaticArrays, EnumX
-import ..MyMessages
-EnumX.@enumx GNSSFixType{UInt8} none = 0, fix_3d = 3, float_fix = 5, int_fix = 6
-@kwdef struct GNSSTimeStamp
-    weeks::UInt16
-    microseconds::UInt64
-end
-@kwdef struct GNSSMeasurement
-    timestamp::GNSSTimeStamp
-    fix_type::GNSSFixType.T
-    position_ecef::StaticArrays.SVector{3, Float64}
-    velocity_ecef::StaticArrays.SVector{3, Float64}
-    position_covariance_ecef::StaticArrays.SMatrix{3, 3, Float64, 9}
-    velocity_covariance_ecef::StaticArrays.SMatrix{3, 3, Float64, 9}
-end
-end
-
-# GNC/GNC.jl
-module GNC
-export Navigation
-import StaticArrays, EnumX
-import ..MyMessages
-include("Navigation/Navigation.jl")
-end
-
-# GNC/Navigation/Navigation.jl
-module Navigation
-export NavInputs
-import StaticArrays, EnumX
-import ..MyMessages
-@kwdef struct NavInputs
-    barometer_measurement::MyMessages.Sensors.Barometer.BarometerMeasurement
-    gnss_measurement::MyMessages.Sensors.GNSS.GNSSMeasurement
-end
-end
+# The filename overload is a shorthand for loading and then generating.
+generate_julia("examples/messages.yaml", "build/messages/julia", "MyMessages")
 ```
 
-### Example C++
+`load_specification` expands includes relative to each containing file and retains source filenames for error messages. Includes can mix formats when both reader packages are loaded. The returned tree can be reused without reading those files again. File suffixes select the reader; unrecognized suffixes and recursive includes are rejected.
 
-TODO
+Julia produces `build/messages/julia/MyMessages/MyMessages.jl` and one file per nested module. C++ produces a single self-contained C++17 header at `build/messages/cpp/MyMessages/MyMessages.hpp`. Each generator returns the absolute path to its root file. Definitions are validated and rendered before output is written. Generated paths are overwritten; unrelated files are left alone.
 
-## Outstanding Questions
+### Build workflow
 
-Are *all* types that the embedded software uses expected to come from this system? We only truly care about defining the interface between the embedded software and the simulation, but will the practical implementation of these types end up requiring that _everything_ is defined this way? For instance, if this system were used to describe a set of parameters for the embedded system, that implies that every parameter must be one of these types. That may prove restrictive when parameters might be better typed as C++-specific types (pointers, look-up-tables, etc.). We might allow the parameters to be defined using this IDL, but then have a "constants" structure inside the C++ that never touches the interface, and the parameters could be used to specify the structure.
+Generation normally belongs in a separate build step. The simulation can then use a regular `include` of the generated root file, as in the opening example. Its Julia environment needs EnumX and StaticArrays; GradientMicroIDL is needed only for generation. C++ consumers need the generated include directory and Eigen headers when numeric array fields are present. Generation itself does not compile C++ or obtain Eigen.
 
-Should we generate a top-level Project.toml file to provide compat bounds on StaticArrays and EnumX? We don't expect this to literally be a registered package, so the top-level module will simply be included, so that Project.toml wouldn't get used anyway. But one _could_ make the built system a package. In that case, it's up to the user to set that up how they like. So the answer here is _no_.
+The namespace example can be generated with `julia --project=test examples/messages.jl` from the package directory. Its paths are anchored to `@__DIR__`, and its outputs are under `build/messages/julia/MyMessages/` and `build/messages/cpp/MyMessages/`.
+
+## Running the tests
+
+The full test suite uses Julia 1.12 or later and a native C++17 compiler. The compiled test harness currently supports Linux and macOS; CI runs GCC on Linux and Apple Clang on macOS. The compiler and Julia must target the same architecture.
+
+On macOS, a compiler is provided by Xcode Command Line Tools (`xcode-select --install`). On Debian/Ubuntu, `sudo apt-get install g++` provides the compiler and development files. Other Linux distributions can supply GCC or Clang through their package manager. No CMake or C++ test framework is needed.
+
+From the package directory:
+
+```sh
+julia --project=test -e 'using Pkg; Pkg.instantiate()'
+julia --project=test test/runtests.jl
+```
+
+If an existing local manifest predates changes to the test dependencies, `julia --project=test -e 'using Pkg; Pkg.resolve(); Pkg.instantiate()'` refreshes it. Fresh checkouts do not need this extra step.
+
+The harness uses `c++` by default. `CXX` can specify another executable name or an absolute path, without additional flags:
+
+```sh
+CXX=clang++ julia --project=test test/runtests.jl
+```
+
+A missing compiler fails the test run with setup instructions; compiled tests are not silently skipped. Compiler errors from the shared-library build are shown normally. Three additional syntax-only compiles are expected to fail: writing through a const view, obtaining a view from a temporary message, and obtaining a view from a const temporary message. A successful control compile runs first so missing headers cannot masquerade as the expected failures.
+
+### Eigen for testing
+
+The test harness obtains Eigen 5.0.0 through `test/Artifacts.toml`, which pins the official release archive by its download checksum and unpacked tree hash. Julia downloads and verifies it on the first compiled test run, then reuses the copy in its artifact cache. Local tests and CI use the same declaration. No Eigen compilation or system installation is needed: the test compiler is simply given the artifact's include directory.
+
+The first run needs network access to obtain the artifact; subsequent runs can use the cached files offline. Code generation itself does not request the artifact or require a compiler. A manually unpacked Eigen directory under `test/` is not used. Updating Eigen means updating the versioned URL and both hashes in `test/Artifacts.toml`, together with the release-directory name in `eigen_include_dir` in `test/cpp_test_setup.jl`.
+
+### A small Julia-to-C++ example
+
+[`test/cpp_call_example.jl`](test/cpp_call_example.jl) is a runnable walkthrough using the supplied message definitions. Its companion [`test/cpp/mutate_measurement.cpp`](test/cpp/mutate_measurement.cpp) defines a function inside an `extern "C"` block that adds `(10, 20, 30)` to a GNSS position through an Eigen view. Julia passes a `Ref{GNSSPositionMeasurement}` with `ccall` and reads the updated message from the `Ref`. Comments explain the build, function lookup, pointer argument, and storage lifetime.
+
+The example runs with the full suite, or on its own from the package directory:
+
+```sh
+julia --project=test test/cpp_call_example.jl
+```
+
+### What the compiled tests do
+
+The README YAML excerpts are checked against the files in `examples/`. Tests generate and load Julia code and compile C++ headers for each of those example files.
+
+The interoperability harness generates both languages in a temporary directory, builds one shared library, and calls it from Julia. Layout probes use the C++ compiler's `sizeof`, `alignof`, and `offsetof`; their expected values come from Julia's loaded types rather than the generator's layout records. The real example is supplemented with all scalar widths, both 64-bit enum extremes, rectangular matrices, row/column shapes, and arrays of padded messages. Parameterized fixtures additionally check nested arrays, multiple lengths, concrete instantiations, parameter forwarding, and documentation.
+
+The library reads Julia-constructed values, fills fresh Julia-owned storage with C++-constructed values, and modifies fields through Eigen views and ordinary C++ member access. Tests compare field values rather than padding bytes. C++ checks return a failing source line number instead of aborting the Julia process. The shared library is unloaded before the temporary directory is removed.
+
+The CI workflow in `.github/workflows/test.yml` instantiates the same test workspace and runs the same command. Its Julia depot cache also retains downloaded artifacts between runs.
