@@ -51,6 +51,64 @@ function check_parameters(root, library)
         field_documentation = strip(documentation.data[:fields][:values])
         @test field_documentation == "Coefficients in command order."
 
+        # An ordinary Vector is accepted by the inferred constructor. The existing
+        # explicit constructor performs the StaticArray and scalar conversions.
+        inferred_motor = Motor(7, 3, [5, 6])
+        @test inferred_motor === motor
+        @test Motor(;
+            tag = 7,
+            scale = 3,
+            values = [5, 6],
+        ) === motor
+
+        # A nested message exposes its concrete parameter through its type. Neither
+        # holder field is itself an array, so N cannot come from an outer length.
+        holder = root.Components.MotorHolder(inferred_motor)
+        @test holder isa root.Components.MotorHolder{2}
+        @test holder.motor === inferred_motor
+        @test root.Components.MotorHolder(; motor = inferred_motor) === holder
+
+        # The same N is used by two fields. Disagreeing lengths fail before attempting
+        # field conversion in the explicit constructor.
+        matched = root.Components.MatchedValues([1.0, 2.0], [3.0, 4.0])
+        @test matched isa root.Components.MatchedValues{2}
+        @test matched.primary == SVector(1.0, 2.0)
+        @test_throws ArgumentError root.Components.MatchedValues([1.0, 2.0], [3.0])
+
+        # Both lengths are recovered from the motors array: M from its length and N
+        # from the concrete nested messages. All elements must agree about N.
+        motors = [Motor(7, 3, [1.0, 2.0]), Motor(7, 3, [3.0, 4.0])]
+        inferred_controller = Controller(
+            2,
+            8.0,
+            motors,
+            Motor(7, 3, [5.0, 6.0]),
+            SMatrix{1, 2}(motors),
+        )
+        @test inferred_controller isa Controller{2, 2}
+        @test inferred_controller.motors[2].values == SVector(3.0, 4.0)
+        @test Controller(;
+            count = 2,
+            gain = 8.0,
+            motors,
+            backup = Motor(7, 3, [5.0, 6.0]),
+            matrix = SMatrix{1, 2}(motors),
+        ) === inferred_controller
+        @test_throws ArgumentError Controller(
+            2,
+            8.0,
+            [motors[1], Motor(7, 3, [1.0, 2.0, 3.0])],
+            Motor(7, 3, [5.0, 6.0]),
+            SMatrix{1, 2}(motors),
+        )
+        @test_throws ArgumentError Controller(
+            0,
+            8.0,
+            Motor[],
+            Motor(7, 3, [5.0, 6.0]),
+            SMatrix{1, 2}(motors),
+        )
+
         # Field documentation also works without a message description. Metadata names
         # remain valid field names because fields live in their own dictionary.
         documented = root.Components.DocumentedFields(1, 2, 3)

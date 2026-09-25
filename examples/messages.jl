@@ -2,7 +2,7 @@
 #
 # From this repo's root, run:
 #
-#   julia --project=. examples/messages.jl
+#   julia --project=test examples/messages.jl
 #
 
 import GradientMicroIDL

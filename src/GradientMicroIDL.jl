@@ -26,7 +26,8 @@ load YAML or JSON to enable its reader. `base_dir` resolves includes in directly
 specifications or dictionaries. File includes are relative to their containing file.
 
 All inputs share semantic validation. Invalid definitions raise `ArgumentError` before
-output files are written. Length parameters require explicit constructor arguments.
+output files are written. Generated Julia constructors infer lengths from compatible
+fields when possible; callers can also supply length parameters explicitly.
 """
 function generate_julia(
     specification::NamespaceSpec,
