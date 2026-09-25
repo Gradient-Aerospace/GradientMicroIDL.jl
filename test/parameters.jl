@@ -175,6 +175,83 @@ function check_parameters(root, library)
 
 end
 
+@testset "Constructor inference edge cases" begin
+
+    # These declarations isolate each source of inference. In particular, `item` is a
+    # valid length parameter that once collided with the generated do-block argument.
+    leaf = GradientMicroIDL.MessageSpec(
+        "Leaf";
+        parameters = [
+            GradientMicroIDL.ParameterSpec("A"),
+            GradientMicroIDL.ParameterSpec("B"),
+        ],
+        fields = [
+            GradientMicroIDL.FieldSpec("bytes", "uint8[A]"),
+            GradientMicroIDL.FieldSpec("values", "float64[B]"),
+        ],
+    )
+    messages = [
+        leaf,
+        GradientMicroIDL.MessageSpec(
+            "ScalarHolder";
+            parameters = [GradientMicroIDL.ParameterSpec("N")],
+            fields = [GradientMicroIDL.FieldSpec("leaf", "Leaf{2,N}")],
+        ),
+        GradientMicroIDL.MessageSpec(
+            "ArrayHolder";
+            parameters = [GradientMicroIDL.ParameterSpec("item")],
+            fields = [GradientMicroIDL.FieldSpec("children", "Leaf{2,item}[2]")],
+        ),
+        GradientMicroIDL.MessageSpec(
+            "MatrixHolder";
+            parameters = [GradientMicroIDL.ParameterSpec("N")],
+            fields = [GradientMicroIDL.FieldSpec("children", "Leaf{2,N}[1,2]")],
+        ),
+        GradientMicroIDL.MessageSpec(
+            "MixedSources";
+            parameters = [GradientMicroIDL.ParameterSpec("N")],
+            fields = [
+                GradientMicroIDL.FieldSpec("values", "float64[N]"),
+                GradientMicroIDL.FieldSpec("leaf", "Leaf{N,2}"),
+            ],
+        ),
+        GradientMicroIDL.MessageSpec(
+            "UnusedLength";
+            parameters = [GradientMicroIDL.ParameterSpec("N")],
+            fields = [GradientMicroIDL.FieldSpec("value", "uint8")],
+        ),
+    ]
+    specification = GradientMicroIDL.NamespaceSpec(; messages)
+    mktempdir() do directory
+
+        path = GradientMicroIDL.generate_julia(specification, directory, "Inference")
+        generated = Base.include(Module(gensym(:Inference)), path)
+        Base.invokelatest(generated) do root
+
+            short = root.Leaf([1, 2], [3.0, 4.0, 5.0])
+            long = root.Leaf([1, 2], [3.0, 4.0, 5.0, 6.0])
+            @test short isa root.Leaf{2, 3}
+            @test root.ScalarHolder(short) isa root.ScalarHolder{3}
+            @test root.ArrayHolder([short, short]) isa root.ArrayHolder{3}
+            @test root.MatrixHolder(SMatrix{1, 2}([short, short])) isa
+                root.MatrixHolder{3}
+            @test_throws ArgumentError root.ArrayHolder([short, long])
+            @test_throws ArgumentError root.MatrixHolder(reshape(Any[short, long], 1, 2))
+
+            # When two different fields imply N, they must agree. When none reveals it,
+            # the explicit constructor is still the supported way to choose the type.
+            fixed = root.Leaf([1, 2, 3], [4.0, 5.0])
+            @test root.MixedSources([1.0, 2.0, 3.0], fixed) isa root.MixedSources{3}
+            @test_throws ArgumentError root.MixedSources([1.0, 2.0], fixed)
+            @test root.UnusedLength{2}(7).value == 7
+            @test_throws MethodError root.UnusedLength(7)
+
+        end
+
+    end
+
+end
+
 @testset "Parameterized messages" begin
 
     # Generate into one temporary tree and compile the small independent C++ probe.

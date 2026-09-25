@@ -142,9 +142,11 @@ function print_inference_source(io, parameter, source; first_source)
             )
             println(io, "        $parameter = $expression")
         end
-        println(io, "        if !Base.all($name) do item")
-        println(io, "            item isa $message_type &&")
-        println(io, "                Base.typeof(item).parameters[$index] == $parameter")
+
+        println(io, "        if !Base.all($name) do _element")
+        println(io, "            _element isa $message_type &&")
+        comparison = "Base.typeof(_element).parameters[$index] == $parameter"
+        println(io, "                $comparison")
         println(io, "        end")
         println(io, "            Base.throw(Base.ArgumentError($(repr(context))))")
         println(io, "        end")
