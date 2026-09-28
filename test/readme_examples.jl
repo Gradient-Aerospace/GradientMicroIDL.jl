@@ -78,6 +78,11 @@ end
                         num_motors = 2,
                         motors = (motor, motor),
                     )
+                    inferred = controls.ControlParameters(;
+                        num_motors = 2,
+                        motors = (motor, motor),
+                    )
+                    @test inferred === parameters
                     @test isbitstype(typeof(parameters))
                     @test parameters.motors[2].torque_constant == 1.0
                     @test fieldtype(controls.VehicleParameters, :control) ==
@@ -85,6 +90,9 @@ end
                     fleet = controls.FleetParameters{2, 3}(
                         (parameters, parameters, parameters),
                     )
+                    @test controls.FleetParameters(
+                        (parameters, parameters, parameters),
+                    ) === fleet
                     @test fleet.control[3] === parameters
 
                 end

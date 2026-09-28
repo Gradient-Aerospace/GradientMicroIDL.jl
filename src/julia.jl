@@ -70,6 +70,114 @@ function print_julia_description(io, text, indent)
 
 end
 
+# Generated guards use ordinary if blocks so their failure conditions read directly.
+function print_constructor_error_if(io, condition, message)
+    println(io, "        if $condition")
+    println(io, "            Base.throw(Base.ArgumentError($(repr(message))))")
+    println(io, "        end")
+end
+
+# Each symbolic vector length or nested message argument can reveal a parameter. Keep
+# all occurrences so inferred constructors can reject disagreements between fields.
+function inference_sources(definition)
+
+    sources = Dict(name => NamedTuple[] for name in definition.parameters)
+    for field in definition.fields
+
+        for (index, argument) in enumerate(field.type.arguments)
+            argument isa Symbol || continue
+            push!(sources[string(argument)], (; field, kind = :nested, index))
+        end
+        if length(field.dimensions) == 1 && only(field.dimensions) isa Symbol
+            name = string(only(field.dimensions))
+            push!(sources[name], (; field, kind = :vector, index = 0))
+        end
+
+    end
+    return sources
+
+end
+
+# A nested message has already been constructed, so its concrete type reveals its length
+# arguments. For an array, every element must carry the same argument value. The outer
+# explicit constructor still handles type conversion and checks the final field shapes.
+function print_inference_source(io, parameter, source; first_source)
+
+    field = source.field
+    name = field.name
+    context = "cannot infer $parameter from $name"
+    if source.kind == :vector
+
+        length_expression = "Base.length($name)"
+        if first_source
+            println(io, "        $parameter = $length_expression")
+        else
+            print_constructor_error_if(io, "$length_expression != $parameter", context)
+        end
+        return
+
+    end
+
+    message_type = field.type.name
+    index = source.index
+    if isempty(field.dimensions)
+
+        print_constructor_error_if(io, "!($name isa $message_type)", context)
+        expression = "Base.typeof($name).parameters[$index]"
+        if first_source
+            println(io, "        $parameter = $expression")
+        else
+            print_constructor_error_if(io, "$expression != $parameter", context)
+        end
+
+    else
+
+        print_constructor_error_if(io, "Base.isempty($name)", context)
+        expression = "Base.typeof(Base.first($name)).parameters[$index]"
+        if first_source
+            print_constructor_error_if(
+                io,
+                "!(Base.first($name) isa $message_type)",
+                context,
+            )
+            println(io, "        $parameter = $expression")
+        end
+
+        println(io, "        if !Base.all($name) do _element")
+        println(io, "            _element isa $message_type &&")
+        comparison = "Base.typeof(_element).parameters[$index] == $parameter"
+        println(io, "                $comparison")
+        println(io, "        end")
+        println(io, "            Base.throw(Base.ArgumentError($(repr(context))))")
+        println(io, "        end")
+
+    end
+
+end
+
+# The unparameterized constructor exists only when every length can be recovered from
+# arguments. Calling the explicit constructor preserves its field order and conversions.
+function print_inferred_constructor(io, definition, arguments, name)
+
+    sources = inference_sources(definition)
+    parameters = definition.parameters
+    all(parameter -> !isempty(sources[parameter]), parameters) || return false
+    println(io, "    # Infer lengths from vector fields and concrete nested messages.")
+    print_arguments(io, "    function $name(", arguments, "    ")
+    for parameter in parameters
+
+        for (index, source) in enumerate(sources[parameter])
+            print_inference_source(io, parameter, source; first_source = index == 1)
+        end
+
+    end
+    suffix = "{" * join(parameters, ", ") * "}"
+    print_arguments(io, "        return $name$suffix(", arguments, "        ")
+    println(io, "    end\n")
+    return true
+
+end
+
 # A message has two orders: physical fields for layout and declared arguments for callers.
 # Print both constructors here so they cannot accidentally disagree about that mapping.
 function print_message(io, definition)
@@ -111,14 +219,14 @@ function print_message(io, definition)
     for parameter in parameters
 
         condition = "$parameter isa Base.Int64 && 0 < $parameter <= Base.typemax(Base.Int)"
-        message = repr("$parameter must be a positive Int64 length")
-        error = "Base.ArgumentError($message)"
-        println(io, "        $condition ||")
-        println(io, "            Base.throw($error)")
+        message = "$parameter must be a positive Int64 length"
+        print_constructor_error_if(io, "!($condition)", message)
 
     end
     print_arguments(io, "        return new$suffix(", stored, "        ")
     println(io, "    end\n")
+    has_inferred = !isempty(parameters) &&
+        print_inferred_constructor(io, definition, arguments, name)
     println(io, "end\n")
 
     # Delegating keyword construction keeps its conversions identical to the positional
@@ -127,6 +235,14 @@ function print_message(io, definition)
     print_arguments(io, "function $constructor(; ", arguments, ""; suffix = where_clause)
     print_arguments(io, "    return $constructor(", arguments, "    ")
     println(io, "end\n")
+    if has_inferred
+
+        println(io, "# Unparameterized keywords use the same inferred positional path.")
+        print_arguments(io, "function $name(; ", arguments, "")
+        print_arguments(io, "    return $name(", arguments, "    ")
+        println(io, "end\n")
+
+    end
 
 end
 

@@ -35,6 +35,17 @@ namespaces:
           parameters: uint8
           fields:
             type: uint8
+      MotorHolder:
+        parameters:
+          N: int64
+        fields:
+          motor: Motor{N}
+      MatchedValues:
+        parameters:
+          N: int64
+        fields:
+          primary: float64[N]
+          backup: float64[N]
       Vehicle:
         fields:
           controllers: Controller{2,3}[2]

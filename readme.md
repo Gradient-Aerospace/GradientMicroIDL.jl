@@ -442,20 +442,28 @@ messages:
 
 In `examples/control.yaml`, these entries follow the earlier definitions in the same `messages` dictionary; the two excerpts do not represent two separate `messages` keys. The first uses a concrete four-motor controller. The second contains `M` controllers, each with capacity for `N` motors. All template arguments must be supplied; bare `ControlParameters` is not a concrete field type.
 
-Julia generation produces parametric types such as `ControlParameters{N}`; C++ generation produces templates such as `ControlParameters<N>`. Julia callers explicitly supply lengths for both positional and keyword constructors:
+Julia generation produces parametric types such as `ControlParameters{N}`; C++ generation produces templates such as `ControlParameters<N>`. Julia callers can supply lengths explicitly or let the constructor infer them from vector fields and concrete nested messages:
 
 ```julia
 motor = MotorParameters(;
     position = SA[0.0, 0.0, 0.0],
     torque_constant = 1.0,
 )
-controls = ControlParameters{2}(;
+controls = ControlParameters(;
+    num_motors = 2,
+    motors = SVector(motor, motor),
+)
+
+# The explicit constructor remains available when the length is already known.
+@assert controls == ControlParameters{2}(;
     num_motors = 2,
     motors = SVector(motor, motor),
 )
 ```
 
-This assumes the generated message names and StaticArrays have been imported. Lengths are type parameters, not additional stored fields, and the generator does not infer them from constructor arguments. An exported C function uses a concrete C++ instantiation, such as `ControlParameters<2>*`, paired with Julia `Ref{ControlParameters{2}}`. Changing the Julia parameter does not instantiate new code in an already compiled C++ library.
+This assumes the generated message names and StaticArrays have been imported. Lengths are type parameters, not additional stored fields. In the example above, `length(motors)` supplies `N`. An input such as `motor::MotorParameters{4}` can also supply `N` when a field is declared as `MotorParameters{N}`. For a field declared as `MotorParameters{N}[M]`, the constructor gets `M` from the array length and checks that every motor has the same `N`. If several fields imply one parameter, their values must agree. An inferred constructor is generated when every parameter can be found in its input fields; otherwise, the explicit `{N}` form remains available. Once lengths are inferred, the explicit constructor performs the usual field conversions, including conversion from a regular Julia vector to a fixed-size `SVector` when its contents are compatible.
+
+An exported C function uses a concrete C++ instantiation, such as `ControlParameters<2>*`, paired with Julia `Ref{ControlParameters{2}}`. Changing the Julia parameter does not instantiate new code in an already compiled C++ library.
 
 Parameters can determine vector lengths and arguments of nested messages.
 
@@ -523,7 +531,7 @@ Names use ASCII letters and digits with underscores, beginning with a letter. La
 
 Fields are stored in decreasing alignment order, with declaration order breaking ties. Field size does not break ties. Positive lengths do not change array alignment, so this order remains fixed across parameter values, including nested parameterized messages. Native padding is retained, including the trailing padding needed for arrays of structs.
 
-Both positional constructors follow declared field order regardless of physical storage order. Julia also provides keyword constructors; all fields are required, and values are converted to their declared types. A parameterized Julia constructor requires positive `Int64` length arguments. Ordinary Julia types are immutable and `isbits`; parameterized types become concrete `isbits` types when supplied valid lengths.
+Both positional constructors follow declared field order regardless of physical storage order. Julia also provides keyword constructors; all fields are required, and values are converted to their declared types. Parameterized Julia messages require positive `Int64` lengths, whether supplied explicitly or inferred from fields. Ordinary Julia types are immutable and `isbits`; parameterized types become concrete `isbits` types when supplied valid lengths.
 
 C++ structs have a zero-initializing default constructor and an explicit value constructor. Primitive and enum arguments are passed by value, message arguments by const reference, and array arguments by const reference to a built-in array of the required length. Arrays are copied into the struct's own storage. Constructors do not accept Eigen expressions directly. Zero initialization applies recursively to fields, including enums whose zero value may not have a named enumerator; padding bytes are unspecified.
 

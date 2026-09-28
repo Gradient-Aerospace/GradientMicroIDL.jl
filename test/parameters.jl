@@ -51,6 +51,64 @@ function check_parameters(root, library)
         field_documentation = strip(documentation.data[:fields][:values])
         @test field_documentation == "Coefficients in command order."
 
+        # An ordinary Vector is accepted by the inferred constructor. The existing
+        # explicit constructor performs the StaticArray and scalar conversions.
+        inferred_motor = Motor(7, 3, [5, 6])
+        @test inferred_motor === motor
+        @test Motor(;
+            tag = 7,
+            scale = 3,
+            values = [5, 6],
+        ) === motor
+
+        # A nested message exposes its concrete parameter through its type. Neither
+        # holder field is itself an array, so N cannot come from an outer length.
+        holder = root.Components.MotorHolder(inferred_motor)
+        @test holder isa root.Components.MotorHolder{2}
+        @test holder.motor === inferred_motor
+        @test root.Components.MotorHolder(; motor = inferred_motor) === holder
+
+        # The same N is used by two fields. Disagreeing lengths fail before attempting
+        # field conversion in the explicit constructor.
+        matched = root.Components.MatchedValues([1.0, 2.0], [3.0, 4.0])
+        @test matched isa root.Components.MatchedValues{2}
+        @test matched.primary == SVector(1.0, 2.0)
+        @test_throws ArgumentError root.Components.MatchedValues([1.0, 2.0], [3.0])
+
+        # Both lengths are recovered from the motors array: M from its length and N
+        # from the concrete nested messages. All elements must agree about N.
+        motors = [Motor(7, 3, [1.0, 2.0]), Motor(7, 3, [3.0, 4.0])]
+        inferred_controller = Controller(
+            2,
+            8.0,
+            motors,
+            Motor(7, 3, [5.0, 6.0]),
+            SMatrix{1, 2}(motors),
+        )
+        @test inferred_controller isa Controller{2, 2}
+        @test inferred_controller.motors[2].values == SVector(3.0, 4.0)
+        @test Controller(;
+            count = 2,
+            gain = 8.0,
+            motors,
+            backup = Motor(7, 3, [5.0, 6.0]),
+            matrix = SMatrix{1, 2}(motors),
+        ) === inferred_controller
+        @test_throws ArgumentError Controller(
+            2,
+            8.0,
+            [motors[1], Motor(7, 3, [1.0, 2.0, 3.0])],
+            Motor(7, 3, [5.0, 6.0]),
+            SMatrix{1, 2}(motors),
+        )
+        @test_throws ArgumentError Controller(
+            0,
+            8.0,
+            Motor[],
+            Motor(7, 3, [5.0, 6.0]),
+            SMatrix{1, 2}(motors),
+        )
+
         # Field documentation also works without a message description. Metadata names
         # remain valid field names because fields live in their own dictionary.
         documented = root.Components.DocumentedFields(1, 2, 3)
@@ -112,6 +170,83 @@ function check_parameters(root, library)
         @test controller.motors[3].values == SVector(1.0, 2.0, 3.0, 42.0)
         @test controller.backup.values == SVector(5.0, 6.0)
         @test controller.matrix[1, 2].tag == 7
+
+    end
+
+end
+
+@testset "Constructor inference edge cases" begin
+
+    # These declarations isolate each source of inference. In particular, `item` is a
+    # valid length parameter that once collided with the generated do-block argument.
+    leaf = GradientMicroIDL.MessageSpec(
+        "Leaf";
+        parameters = [
+            GradientMicroIDL.ParameterSpec("A"),
+            GradientMicroIDL.ParameterSpec("B"),
+        ],
+        fields = [
+            GradientMicroIDL.FieldSpec("bytes", "uint8[A]"),
+            GradientMicroIDL.FieldSpec("values", "float64[B]"),
+        ],
+    )
+    messages = [
+        leaf,
+        GradientMicroIDL.MessageSpec(
+            "ScalarHolder";
+            parameters = [GradientMicroIDL.ParameterSpec("N")],
+            fields = [GradientMicroIDL.FieldSpec("leaf", "Leaf{2,N}")],
+        ),
+        GradientMicroIDL.MessageSpec(
+            "ArrayHolder";
+            parameters = [GradientMicroIDL.ParameterSpec("item")],
+            fields = [GradientMicroIDL.FieldSpec("children", "Leaf{2,item}[2]")],
+        ),
+        GradientMicroIDL.MessageSpec(
+            "MatrixHolder";
+            parameters = [GradientMicroIDL.ParameterSpec("N")],
+            fields = [GradientMicroIDL.FieldSpec("children", "Leaf{2,N}[1,2]")],
+        ),
+        GradientMicroIDL.MessageSpec(
+            "MixedSources";
+            parameters = [GradientMicroIDL.ParameterSpec("N")],
+            fields = [
+                GradientMicroIDL.FieldSpec("values", "float64[N]"),
+                GradientMicroIDL.FieldSpec("leaf", "Leaf{N,2}"),
+            ],
+        ),
+        GradientMicroIDL.MessageSpec(
+            "UnusedLength";
+            parameters = [GradientMicroIDL.ParameterSpec("N")],
+            fields = [GradientMicroIDL.FieldSpec("value", "uint8")],
+        ),
+    ]
+    specification = GradientMicroIDL.NamespaceSpec(; messages)
+    mktempdir() do directory
+
+        path = GradientMicroIDL.generate_julia(specification, directory, "Inference")
+        generated = Base.include(Module(gensym(:Inference)), path)
+        Base.invokelatest(generated) do root
+
+            short = root.Leaf([1, 2], [3.0, 4.0, 5.0])
+            long = root.Leaf([1, 2], [3.0, 4.0, 5.0, 6.0])
+            @test short isa root.Leaf{2, 3}
+            @test root.ScalarHolder(short) isa root.ScalarHolder{3}
+            @test root.ArrayHolder([short, short]) isa root.ArrayHolder{3}
+            @test root.MatrixHolder(SMatrix{1, 2}([short, short])) isa
+                root.MatrixHolder{3}
+            @test_throws ArgumentError root.ArrayHolder([short, long])
+            @test_throws ArgumentError root.MatrixHolder(reshape(Any[short, long], 1, 2))
+
+            # When two different fields imply N, they must agree. When none reveals it,
+            # the explicit constructor is still the supported way to choose the type.
+            fixed = root.Leaf([1, 2, 3], [4.0, 5.0])
+            @test root.MixedSources([1.0, 2.0, 3.0], fixed) isa root.MixedSources{3}
+            @test_throws ArgumentError root.MixedSources([1.0, 2.0], fixed)
+            @test root.UnusedLength{2}(7).value == 7
+            @test_throws MethodError root.UnusedLength(7)
+
+        end
 
     end
 
